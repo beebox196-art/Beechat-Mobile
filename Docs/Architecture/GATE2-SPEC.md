@@ -1,9 +1,17 @@
 # Gate 2 Specification: Real Data Pipeline
 
 **Date:** 2026-05-15
-**Status:** DRAFT — Pending team review
+**Status:** DRAFT — Under team review (Kieran review received, fixes applied)
 **Author:** Bee (Coordinator)
 **Reviewers:** Q (Builder), Kieran (Reviewer), Mel (Designer), Gav (Researcher)
+
+### Review Log
+| Reviewer | Status | Key Findings |
+|----------|--------|-------------|
+| Kieran | ✅ Complete | 2 blockers (AnyCodable, error handling), 4 warnings (threading, temporal coupling, dependency graph, in-flight sends), 2 nits |
+| Mel | 🔄 In progress | — |
+| Gav | 🔄 In progress | — |
+| Q | ⏳ Pending | — |
 
 ---
 
@@ -38,7 +46,7 @@ Every component must be a **standalone Swift package or module** with a clear pu
 | **BeeChatUI** | NEW (local SPM package) | ExyteChat, BeeChatMobileKit | View layer — maps ViewModel state to Exyte ChatView |
 | **BeeChatMobile** (app target) | NEW | BeeChatMobileKit, BeeChatUI | App entry point, SwiftUI lifecycle, scene management |
 
-**Package.swift dependency graph:**
+**Package.swift dependency graph:** *(Updated after Kieran review — removed duplicate dependency)*
 ```
 BeeChatMobile (app)
 ├── BeeChatUI
@@ -49,8 +57,9 @@ BeeChatMobile (app)
 │       │   └── BeeChatPersistence
 │       │       └── GRDB
 │       └── (iOS-specific config, Keychain, etc.)
-└── BeeChatMobileKit (re-exported through BeeChatUI)
 ```
+
+> **Kieran's finding:** The original graph listed `BeeChatMobileKit` twice — once as a direct app dependency and once transitively through `BeeChatUI`. Removed the direct dependency; the app accesses BeeChatMobileKit through BeeChatUI.
 
 ### 2.2 Don't Reinvent the Wheel
 
@@ -154,12 +163,13 @@ public struct BeeChatMobileConfig {
 }
 ```
 
-**BeeChatMobileViewModel:**
+**BeeChatMobileViewModel:** *(Updated after Kieran review — threading fix)*
 ```swift
 @MainActor @Observable
 final class BeeChatMobileViewModel {
     // Connection
     var connectionState: ConnectionState = .disconnected
+    var connectionError: String?              // NEW: error message for UI
     
     // Data
     var sessions: [Session] = []
@@ -175,17 +185,33 @@ final class BeeChatMobileViewModel {
     private var syncBridge: SyncBridge?
     private var persistenceStore: BeeChatPersistenceStore?
     
+    // ⚠️ INIT ORDER INVARIANT: DatabaseManager.shared MUST be opened
+    // (via openDatabase(at:)) BEFORE SyncBridge is created or any
+    // SyncBridge/Persistence method is called. This is a temporal coupling
+    // inherited from v5 — the shared singleton must be initialized first.
+    
     // Offline-first: can show cached data without gateway
     func loadCachedData() throws { ... }
     
     // Online: connect and sync
-    func connect() async throws { ... }
+    func connect() async throws {
+        do {
+            try await syncBridge?.start()
+            connectionState = .connected
+            connectionError = nil
+        } catch {
+            connectionState = .error          // FIX: set error state
+            connectionError = error.localizedDescription  // FIX: propagate message
+        }
+    }
     func disconnect() async { ... }
     
     // Actions
     func sendMessage(_ text: String) async throws { ... }
 }
 ```
+
+> **Kieran's finding:** The original spec only set `.connected` on success and never set `.error` on failure. The v5 macOS app correctly sets `.error` + `offlineStatus`. The mobile ViewModel must do the same.
 
 **MessageMapper:**
 ```swift
@@ -199,24 +225,49 @@ struct MessageMapper {
 }
 ```
 
-**AnyCodable fix:**
-The current `Equatable` implementation uses `NSDictionary.isEqual(to:)` which doesn't work correctly on iOS. Replace with type-explicit comparison:
+**AnyCodable fix:** *(Updated after Kieran review — original spec had bugs)*
+The current `Equatable` implementation uses `NSDictionary.isEqual(to:)` which doesn't work correctly on iOS. The original spec proposed type-explicit `switch` comparison, but Kieran identified two critical bugs:
+
+1. **Numeric types**: `Int64`, `UInt`, `UInt64` values created programmatically won't match `as Int`. NSNumber bridging handles this correctly.
+2. **Array types**: After JSON decode, arrays are stored as `[Any]`, not `[AnyCodable]`. The `case let (a as [AnyCodable], b as [AnyCodable])` pattern would **never match** — array equality would silently always return `false`.
+
+**Corrected fix** using `NSNumber` for numerics and a recursive helper for arrays:
 ```swift
 extension AnyCodable: Equatable {
     public static func == (lhs: AnyCodable, rhs: AnyCodable) -> Bool {
         switch (lhs.value, rhs.value) {
         case let (a as Bool, b as Bool): return a == b
-        case let (a as Int, b as Int): return a == b
-        case let (a as Double, b as Double): return a == b
+        case let (a as NSNumber, b as NSNumber):
+            // Covers Int, Int64, UInt, Float, Double — but NOT Bool (matched above)
+            // NSNumber comparison uses value semantics, matching NSDictionary behavior
+            let objCType = String(cString: NSNumber(value: a).objCType)
+            if objCType == "c" || objCType == "B" { return false }  // Skip Bool masquerading as NSNumber
+            return a == b
         case let (a as String, b as String): return a == b
-        case let (a as [AnyCodable], b as [AnyCodable]): return a == b
-        case let (a as [String: AnyCodable], b as [String: AnyCodable]): return a == b
+        case let (a as [Any], b as [Any]): return compareAnyArrays(a, b)
+        case let (a as [String: Any], b as [String: Any]):
+            guard a.count == b.count else { return false }
+            for (key, val) in a {
+                guard let bVal = b[key] else { return false }
+                if !AnyCodable(val).isEqual(to: AnyCodable(bVal)) { return false }
+            }
+            return true
         case (is NSNull, is NSNull): return true
         default: return false
         }
     }
+    
+    private static func compareAnyArrays(_ lhs: [Any], _ rhs: [Any]) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        for (a, b) in zip(lhs, rhs) {
+            if !AnyCodable(a).isEqual(to: AnyCodable(b)) { return false }
+        }
+        return true
+    }
 }
 ```
+
+> **Kieran's verdict:** This is a real correctness bug. The original fix would pass for scalar values and dictionaries but **silently fail for arrays**. The `NSNumber` approach is what `NSDictionary.isEqual` was doing implicitly, but without the dictionary wrapper. This must be correct before Gate 2A.
 
 **Note:** This fix should be applied to the **v5 repo** (`BeeChat-v5/Sources/BeeChatGateway/AnyCodable.swift`) since both macOS and iOS benefit from a correct implementation. It should NOT be forked into the mobile project.
 
@@ -253,6 +304,8 @@ The macOS v5 reads `~/.openclaw/openclaw.json`. On iOS, the app needs a differen
 - **Option A (MVP):** Hardcoded gateway URL + token in `BeeChatMobileConfig` for development
 - **Option B (future):** Settings screen with QR code pairing or manual entry
 - **For Gate 2B:** Use Option A — a simple config struct with the local gateway URL and token
+
+> **Kieran's addition:** The spec must also handle what happens when `connect()` fails (auth failure, unreachable gateway). The original spec only set `.connected` on success — it never set `.error` or propagated an error message. This has been fixed in the ViewModel example above. The UI must show a clear error state, not just silently stay at `.disconnected`.
 
 ```swift
 extension BeeChatMobileConfig {
@@ -302,25 +355,48 @@ func connect() async throws {
 }
 ```
 
-**SyncBridgeDelegate conformance:**
+**SyncBridgeDelegate conformance:** *(Updated after Kieran review — CRITICAL threading fix)*
 ```swift
 extension BeeChatMobileViewModel: SyncBridgeDelegate {
-    func syncBridge(_ bridge: SyncBridge, didUpdateConnectionState state: ConnectionState) {
-        self.connectionState = state
+    // ⚠️ CRITICAL: SyncBridge is an actor. Delegate callbacks fire on the
+    // actor's executor, NOT on @MainActor. All delegate methods MUST be
+    // marked `nonisolated` and dispatch to @MainActor via Task.
+    // Direct property writes from these callbacks WILL CRASH under strict
+    // concurrency checking. This is the #1 most likely Gate 2 build failure.
+    
+    nonisolated func syncBridge(_ bridge: SyncBridge, didUpdateConnectionState state: ConnectionState) {
+        Task { @MainActor in
+            self.connectionState = state
+        }
     }
     
-    func syncBridge(_ bridge: SyncBridge, didStartStreaming sessionKey: String) {
-        self.isStreaming = true
+    nonisolated func syncBridge(_ bridge: SyncBridge, didStartStreaming sessionKey: String) {
+        Task { @MainActor in
+            self.isStreaming = true
+        }
     }
     
-    func syncBridge(_ bridge: SyncBridge, didStopStreaming sessionKey: String) {
-        self.isStreaming = false
-        Task { await refreshMessages() }
+    nonisolated func syncBridge(_ bridge: SyncBridge, didStopStreaming sessionKey: String) {
+        Task { @MainActor in
+            self.isStreaming = false
+            Task { await self.refreshMessages() }
+        }
     }
     
-    // ... error handling, auto-reset notifications
+    nonisolated func syncBridge(_ bridge: SyncBridge, didEncounterError error: Error) {
+        Task { @MainActor in
+            self.connectionError = error.localizedDescription
+        }
+    }
+    
+    nonisolated func syncBridge(_ bridge: SyncBridge, didStartAutoReset sessionKey: String) { /* UI notification */ }
+    nonisolated func syncBridge(_ bridge: SyncBridge, didStopAutoReset sessionKey: String) { /* UI notification */ }
+    nonisolated func syncBridge(_ bridge: SyncBridge, didStartManualReset sessionKey: String) { /* UI notification */ }
+    nonisolated func syncBridge(_ bridge: SyncBridge, didStopManualReset sessionKey: String) { /* UI notification */ }
 }
 ```
+
+> **Kieran's verdict:** The original spec's delegate example would crash at runtime under strict concurrency. This is the single most likely cause of a Gate 2 build failure. The `nonisolated` + `Task { @MainActor in }` pattern is already proven in v5's `SyncBridgeObserver`.
 
 **Streaming text binding:**
 SyncBridge already manages a `streamingBuffer` and `streamingSessionKeys`. The ViewModel polls `syncBridge.streamingContent(for:)` during streaming and maps it to the Exyte `Message` text.
@@ -328,6 +404,8 @@ SyncBridge already manages a `streamingBuffer` and `streamingSessionKeys`. The V
 **Review checklist for Gate 2B:**
 - [ ] Gateway connects on launch (auto-connect)
 - [ ] Connection state indicator updates in real-time
+- [ ] `.error` state set on auth failure, unreachable gateway, etc.
+- [ ] Error message propagated to UI (not just `.disconnected`)
 - [ ] Incoming messages appear in chat without manual refresh
 - [ ] Streaming text updates character-by-character
 - [ ] Session list refreshes when `sessions.changed` fires
@@ -335,6 +413,7 @@ SyncBridge already manages a `streamingBuffer` and `streamingSessionKeys`. The V
 - [ ] Cached data shows immediately on launch before connection
 - [ ] Gateway token NOT committed to repo
 - [ ] No force-unwraps on optional network responses
+- [ ] All SyncBridgeDelegate callbacks are `nonisolated` with `Task { @MainActor in }` dispatch
 - [ ] Error states handled gracefully (connection refused, auth failure)
 
 ---
@@ -405,9 +484,11 @@ static func toExyteStatus(_ v5Message: BeeChatPersistence.Message) -> ExyteChat.
 - [ ] Send button triggers `sendMessage()`
 - [ ] Optimistic message appears immediately
 - [ ] Gateway receives the message (verify in OpenClaw logs)
-- [ | Bee's reply streams in correctly
+- [ ] Bee's reply streams in correctly
 - [ ] Message status transitions: sending → sent → read
 - [ ] Failed sends show error state
+- [ ] In-flight sends during disconnect: delivery ledger tracks `.pending` → `.failed` if gateway unreachable
+- [ ] Optimistic messages marked `.error` when send fails, with retry UI
 - [ ] Idempotency key prevents duplicate sends
 - [ ] Auto-reset fires correctly when context window fills
 - [ ] No message duplication after reconnect
@@ -447,9 +528,12 @@ The ViewModel needs to:
 - [ ] No duplicate messages after reconciliation
 - [ ] Delivery ledger entries transition correctly
 - [ ] Streaming state cleaned up on disconnect
+- [ ] In-flight sends during disconnect: `.pending` entries reconciled after reconnect
 - [ ] UI shows connection state accurately at all times
+- [ ] `.error` state shown with descriptive message (not just `.disconnected`)
 - [ ] Stall timer fires correctly (30 seconds of no delta → stream cleared)
 - [ ] No crashes or data corruption during rapid connect/disconnect cycles
+- [ ] DatabaseManager.shared init order invariant maintained after reconnect
 
 ---
 
@@ -486,11 +570,15 @@ Each sub-gate requires a **manual verification step** on the iOS simulator (or p
 | Risk | Impact | Likelihood | Mitigation |
 |------|--------|------------|------------|
 | Exyte/Chat API doesn't support some v5 features (streaming, status updates) | Medium | Low | Already verified streaming works in Gate 1; fallback to custom `ChatView` wrapper |
-| `DatabaseManager.shared` singleton conflicts on iOS (different app sandbox) | Low | Medium | `BeeChatMobileConfig` provides iOS-specific path; singleton pattern is fine per-app |
+| `DatabaseManager.shared` singleton temporal coupling | Medium | Low | Document init-order invariant: DB must be opened before SyncBridge creation. No code change needed, but failure to observe this invariant will cause `DatabaseManagerError.notOpen` |
+| **SyncBridgeDelegate callbacks fire on actor executor, not MainActor** | **High** | **High (will crash)** | **All delegate methods MUST be `nonisolated` with `Task { @MainActor in }` dispatch. This is the #1 build failure risk.** |
 | Keychain access differs on iOS vs macOS | Medium | Low | `KeychainTokenStore` uses standard Security framework APIs; verify on simulator |
 | Exyte/Chat `Message` struct is value type — frequent mutations for streaming | Medium | High | Use `@State` array + element replacement (same pattern as demo); SwiftUI's diffing handles it. If performance issues, switch to `@Observable` object wrapper |
 | WebSocket connection drops on iOS background | High | High | Gate 4 (Push Notifications) addresses this. For Gate 2, app is foreground-only. Document as known limitation |
 | GRDB WAL mode on iOS | Low | Low | WAL mode works on iOS. Already configured in `DatabaseManager` |
+| **AnyCodable `Equatable` fails for arrays and some numeric types on iOS** | **High** | **High (silent data corruption)** | **Use `NSNumber` comparison for numerics + recursive `[Any]` comparison for arrays. Apply to v5 repo, not fork.** |
+| Gateway auth/connection failure silently leaves app in `.disconnected` state | Medium | Medium | Set `.error` state + `connectionError` message. Show in UI as offline banner with error detail |
+| In-flight send lost during disconnect | Medium | Medium | Delivery ledger tracks `.pending` → `.failed` if gateway unreachable. Mark optimistic message as error, offer retry |
 
 ---
 
@@ -563,27 +651,32 @@ BeeChatMobile/Sources/BeeChatMobile/BeeChatDemoView.swift  # Replaced by BeeChat
 
 ## 9. Questions for Team Review
 
-### Q to Kieran (Reviewer):
-1. Is the `BeeChatMobileKit` → `BeeChatUI` boundary correct? Should the ViewModel be in the same package as the views, or is the separation worth the overhead?
-2. The `DatabaseManager.shared` singleton pattern — is this safe on iOS where the app sandbox is different, or should we inject a `DatabaseManager` instance?
-3. The `SyncBridgeDelegate` pattern uses `weak var delegate` — in the `@Observable` ViewModel, are there any retain cycle risks we need to guard against beyond the `weak` reference?
-4. Should the AnyCodable fix be a separate PR to v5, or bundled with the mobile work?
+### Kieran's Answers (received):
+1. ✅ Boundary is correct — `BeeChatMobileKit` owns logic, `BeeChatUI` owns views. Separation worth the overhead.
+2. ✅ `DatabaseManager.shared` works but is temporal coupling — must document init-order invariant.
+3. ✅ No retain cycle (`weak` delegate), but delegate callbacks spawn Tasks without `[weak self]`. Acceptable for app-lifecycle ViewModel.
+4. ✅ AnyCodable fix should be PR to v5 repo — confirmed.
+5. **NEW:** `SyncBridgeDelegate` callbacks MUST be `nonisolated` with `Task { @MainActor in }`. This is the #1 crash risk.
+6. **NEW:** Package graph has duplicate `BeeChatMobileKit` dependency — removed direct app dependency, kept transitive.
 
-### Q to Mel (Designer):
-1. The session list — should it be a sidebar (iPad) or a push/pop navigation (iPhone)? Or both (adaptive NavigationSplitView)?
-2. Connection status indicator — where should it live? Top bar? Overlay? Inline with chat?
-3. Offline state — what should the user see when disconnected? Full-screen error? Banner? Cached data with warning?
-4. Streaming text — should we show a typing indicator before the first delta, or jump straight into streaming text?
+### Q to Mel (Designer) — 🔄 Awaiting response:
+1. Session list: sidebar vs push/pop vs adaptive?
+2. Connection status indicator placement?
+3. Offline state UX?
+4. Streaming text UX?
 
-### Q to Gav (Researcher):
-1. Are there better iOS WebSocket libraries than `URLSessionWebSocketTask`? (Current v5 uses it directly via `WebSocketTransport`.) Any gotchas on iOS backgrounding?
-2. Exyte/Chat v2.7.10 — any newer versions or breaking changes we should know about?
-3. Keychain on iOS — is `SecAccessControl` with `kSecAccessControlBiometryAny` the right approach for storing the gateway token, or should we use the `Valet` library from our Phase 0 research?
+### Q to Gav (Researcher) — 🔄 Awaiting response:
+1. WebSocket libraries comparison for iOS?
+2. Exyte/Chat latest version and breaking changes?
+3. Keychain: raw Security framework vs Valet library?
+4. Swift Concurrency actor + @MainActor bridging gotchas?
+5. GRDB on iOS known issues?
+6. SPM modular structure assessment?
 
-### Q to Q (Builder — self-review):
-1. The `MessageMapper` maps v5 `Message` → Exyte `Message`. Is this the right abstraction, or should we map to an intermediate "display model" first?
-2. `@Observable` + `@MainActor` ViewModel — any concerns with SwiftUI re-rendering performance for streaming text?
-3. Package.swift currently uses `swift-tools-version:5.9`. Should we bump to 6.0 since v5 is already on 6.0?
+### Q to Q (Builder) — ⏳ Pending:
+1. MessageMapper: direct mapping vs intermediate display model?
+2. @Observable + @MainActor streaming performance?
+3. Swift tools version: 5.9 vs 6.0?
 
 ---
 
