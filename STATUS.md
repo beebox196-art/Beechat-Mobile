@@ -44,12 +44,42 @@
 
 ### Gate 2: Real Data Pipeline
 **Goal:** Connect Exyte UI to real BeeChat data through Core packages.
-**Exit criteria:**
-- [ ] BeeChatPersistence reads cached sessions on iOS simulator
-- [ ] BeeChatGateway connects to real gateway, receives events
-- [ ] BeeChatSyncBridge reconciles on reconnect
-- [ ] Messages from gateway render in Exyte UI
-- [ ] Sent messages reach gateway (end-to-end send/receive)
+**Spec:** [GATE2-SPEC.md](Docs/Architecture/GATE2-SPEC.md) — **DRAFT, pending team review**
+**Sub-gates:**
+
+#### Gate 2A: AnyCodable Fix + Persistence Layer
+**Goal:** Make v5 Core packages compile for iOS, read cached data from GRDB, render in Exyte UI. No network needed.
+- [ ] v5 packages compile in iOS target
+- [ ] AnyCodable Equatable fix applied to v5 repo
+- [ ] GRDB schema migrations run on iOS
+- [ ] Sessions list displays from local DB
+- [ ] Messages display in Exyte ChatView from local DB
+- [ ] No stray avatar initials on assistant messages
+
+#### Gate 2B: Live Gateway Connection
+**Goal:** Connect to real OpenClaw gateway, receive messages in real-time. Send not required.
+- [ ] App connects to gateway on launch
+- [ ] Connection state visible in UI
+- [ ] Incoming messages render in real-time
+- [ ] Streaming text (delta events) updates character-by-character
+- [ ] Session list updates on `sessions.changed`
+- [ ] Reconnect works after brief disconnect
+- [ ] Cached data shows immediately on launch (offline-first)
+
+#### Gate 2C: End-to-End Send/Receive
+**Goal:** User sends message → gateway processes → reply streams back.
+- [ ] Send triggers `chat.send` via SyncBridge
+- [ ] Optimistic message appears immediately
+- [ ] Bee's reply streams in correctly
+- [ ] Message status transitions work
+- [ ] Failed sends show error state
+
+#### Gate 2D: Reconnect & Reconciliation
+**Goal:** Network interruptions handled gracefully.
+- [ ] Automatic reconnection after network recovery
+- [ ] Reconciliation fetches latest data, no duplicates
+- [ ] Stalled streaming cleaned up
+- [ ] Delivery ledger transitions correctly
 
 ### Gate 3: Mobile UX Shell
 **Goal:** Navigation, sessions list, mobile lifecycle.
@@ -103,9 +133,9 @@ None
 - **Commit:** 452537f (initial commit)
 
 ## Next 3 Priorities
-1. **Gate 2: Real Data Pipeline** — Wire BeeChat Core packages to Exyte UI for real gateway data
-2. **Gate 2: Validate** — Messages from gateway render, sent messages reach gateway end-to-end
-3. **AnyCodable fix** — Resolve v5 AnyCodable.swift iOS compilation issue when wiring real data
+1. **Gate 2 Spec Review** — Team reviews GATE2-SPEC.md, provides feedback
+2. **Gate 2A** — AnyCodable fix + persistence layer (after spec approved)
+3. **Gate 2B** — Live gateway connection (after 2A validated)
 
 ## Mission Control
 - Task: [To be created]
