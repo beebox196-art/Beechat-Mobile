@@ -20,8 +20,8 @@
 |----------|--------|-------------|
 | Kieran | ✅ Complete | 0 new blockers. Previous fixes verified. 1 warning: DatabaseManager.shared temporal coupling needs explicit documentation (already in spec). 1 nit: BeeChatMobileKit naming. |
 | Mel | ✅ Complete | Strip to minimum viable UX. No separate empty state view file. No theme system for Gate 2. Focus on: connection indicator, offline banner, streaming text. |
-| Gav | ✅ Complete | 2 blockers: (1) Package.swift pins Exyte at `from: 2.1.0` not exact `2.7.10`, contradicting spec. (2) Optimistic send code reinvents delivery state — v5's SyncBridge already owns idempotency and delivery ledger. 4 warnings: app dependency boundary, SPM executable target wrong for iOS, transitive deps documented, GRDB observation preferred over manual refresh. |
-| Q | ✅ Complete | 4 must-fixes: (1) App target must be Xcode project not SPM. (2) App needs direct BeeChatMobileKit dependency. (3) Swift tools version must be 6.0 not 5.9. (4) Drop clientMode from config. 4 should-fixes: merge delegate handler, merge small view files, KeychainTokenStore+iOS likely unneeded, streaming messages key by message ID not session ID. |
+| Gav | ✅ Complete | 2 blockers: (1) Package.swift pins Exyte at `from: 2.1.0` not exact `2.7.10`. (2) Optimistic send reinvents delivery state. 4 warnings: app dependency boundary, SPM executable target wrong for iOS, transitive deps documented, GRDB observation preferred. |
+| Q | ✅ Complete | 3 blockers: (1) AnyCodable NSNumber fix has iOS risk — use type-explicit switch instead. (2) Exyte empty-name avatar may still render circle — verify on simulator. (3) PersistenceStore not Sendable — track for post-Gate-2. 7 warnings: DB init-order assertion, blocking DB on MainActor, delegate callback ordering, Exyte error requires DraftMessage, ConnectionState has no .reconnecting, GatewayClient.token non-optional, SyncBridge eager init. 7 nits. |
 
 ---
 
@@ -241,26 +241,24 @@ struct MessageMapper {
 }
 ```
 
-**AnyCodable fix:** *(Updated after Kieran review — original spec had bugs)*
-The current `Equatable` implementation uses `NSDictionary.isEqual(to:)` which doesn't work correctly on iOS. The original spec proposed type-explicit `switch` comparison, but Kieran identified two critical bugs:
+**AnyCodable fix:** *(Updated after Kieran + Q review — NSNumber approach has iOS risk)*
+The current `Equatable` implementation uses `NSDictionary.isEqual(to:)` which doesn't work correctly on iOS. Kieran identified that the original type-explicit switch had bugs (arrays stored as `[Any]` not `[AnyCodable]`). The NSNumber approach was proposed, but Q identified a subtle iOS risk: `NSNumber(value: a)` where `a` is already an `NSNumber` may not preserve the original `objCType` on iOS, which could break the Bool guard.
 
-1. **Numeric types**: `Int64`, `UInt`, `UInt64` values created programmatically won't match `as Int`. NSNumber bridging handles this correctly.
-2. **Array types**: After JSON decode, arrays are stored as `[Any]`, not `[AnyCodable]`. The `case let (a as [AnyCodable], b as [AnyCodable])` pattern would **never match** — array equality would silently always return `false`.
-
-**Corrected fix** using `NSNumber` for numerics and a recursive helper for arrays:
+**Final fix — type-explicit switch (avoids NSNumber entirely):**
 ```swift
 extension AnyCodable: Equatable {
     public static func == (lhs: AnyCodable, rhs: AnyCodable) -> Bool {
         switch (lhs.value, rhs.value) {
+        // Bool first — must match before Int since Bool bridges to NSNumber
         case let (a as Bool, b as Bool): return a == b
-        case let (a as NSNumber, b as NSNumber):
-            // Covers Int, Int64, UInt, Float, Double — but NOT Bool (matched above)
-            // NSNumber comparison uses value semantics, matching NSDictionary behavior
-            let objCType = String(cString: NSNumber(value: a).objCType)
-            if objCType == "c" || objCType == "B" { return false }  // Skip Bool masquerading as NSNumber
-            return a == b
+        // Integer types — after JSON decode, all ints are Int. Programmatic values may be Int64/UInt64.
+        case let (a as Int, b as Int): return a == b
+        case let (a as Int64, b as Int64): return a == b
+        case let (a as Double, b as Double): return a == b
         case let (a as String, b as String): return a == b
+        // Arrays — JSON decode produces [Any], not [AnyCodable]
         case let (a as [Any], b as [Any]): return compareAnyArrays(a, b)
+        // Dictionaries
         case let (a as [String: Any], b as [String: Any]):
             guard a.count == b.count else { return false }
             for (key, val) in a {
@@ -283,7 +281,7 @@ extension AnyCodable: Equatable {
 }
 ```
 
-> **Kieran's verdict:** This is a real correctness bug. The original fix would pass for scalar values and dictionaries but **silently fail for arrays**. The `NSNumber` approach is what `NSDictionary.isEqual` was doing implicitly, but without the dictionary wrapper. This must be correct before Gate 2A.
+> **Q's verdict:** The `NSNumber` approach has a subtle iOS risk (objCType normalization). The type-explicit switch avoids `NSNumber` entirely, is deterministic, and covers 100% of real-world JSON-decoded values. Swift's pattern matching evaluates cases in order, so `Bool` matches before `Int`. Add `Int64`/`UInt64` cases for programmatic values. This is the correct fix.
 
 **Note:** This fix should be applied to the **v5 repo** (`BeeChat-v5/Sources/BeeChatGateway/AnyCodable.swift`) since both macOS and iOS benefit from a correct implementation. It should NOT be forked into the mobile project.
 
@@ -654,7 +652,7 @@ Each sub-gate requires a **manual verification step** on the iOS simulator (or p
 | Exyte/Chat `Message` struct is value type — frequent mutations for streaming | Medium | High | Use `@State` array + element replacement (same pattern as demo); SwiftUI's diffing handles it. If performance issues, switch to `@Observable` object wrapper |
 | WebSocket connection drops on iOS background | High | High | Gate 4 (Push Notifications) addresses this. For Gate 2, app is foreground-only. Document as known limitation |
 | GRDB WAL mode on iOS | Low | Low | WAL mode works on iOS. Already configured in `DatabaseManager` |
-| **AnyCodable `Equatable` fails for arrays and some numeric types on iOS** | **High** | **High (silent data corruption)** | **Use `NSNumber` comparison for numerics + recursive `[Any]` comparison for arrays. Apply to v5 repo, not fork.** |
+| **AnyCodable `Equatable` fails for arrays and some numeric types on iOS** | **High** | **High (silent data corruption)** | **Use type-explicit switch (Bool→Int→Int64→Double→String→[Any]→[String:Any]→NSNull). Avoid NSNumber. Apply to v5 repo, not fork.** |
 | Gateway auth/connection failure silently leaves app in `.disconnected` state | Medium | Medium | Set `.error` state + `connectionError` message. Show in UI as offline banner with error detail |
 | In-flight send lost during disconnect | Medium | Medium | Delivery ledger tracks `.pending` → `.failed` if gateway unreachable. Mark optimistic message as error, offer retry |
 
@@ -781,7 +779,10 @@ The following changes MUST be made before Gate 2A implementation begins. Identif
 | F3 | App needs direct BeeChatMobileKit dependency | Q R2, Gav R2 | App is composition root — creates ViewModel, Config, opens DB. |
 | F4 | Swift tools version must be 6.0 | Q R2, Gav R2 | Mobile Package.swift must declare `swift-tools-version:6.0` to match v5. Add `swiftLanguageVersion(.v5)` per target. |
 | F5 | Drop `clientMode` from BeeChatMobileConfig | Q R2 | v5's `GatewayClient.Configuration` already derives platform from `#if os(iOS)`. |
-| F6 | Optimistic send code reinvents delivery state | Gav R2 | Don't add `status` to `Message`. v5's `SyncBridge.sendMessage` already owns idempotency and delivery ledger. |
+| F6 | Optimistic send code reinvents delivery state | Gav R2 | Don't add `status` to `Message`. v5's `SyncBridge.sendMessage` already owns idempotency and delivery ledger. Track send status in ViewModel mapping layer. |
+| F7 | AnyCodable NSNumber fix has iOS risk | Q R2 | Use type-explicit switch instead of NSNumber comparison. `NSNumber(value: a)` may not preserve objCType on iOS. |
+| F8 | `BeeChatPersistenceStore` not Sendable | Q R2 | Crosses actor boundary in `SyncBridgeConfiguration`. Warning in Swift 5, error in Swift 6. Use `@unchecked Sendable` or wrap in actor. Track for post-Gate-2. |
+| F9 | Exyte `User` with empty name may still render avatar circle | Q R2 | Must verify on simulator during Gate 2A. Fallback: transparent 1px data URL for `avatarURL`. |
 
 ### Should Fix (for cleaner build)
 
@@ -795,6 +796,11 @@ The following changes MUST be made before Gate 2A implementation begins. Identif
 | S6 | Use GRDB observation, not manual refresh | Gav R2 | `ValueObservation` for session/message lists. |
 | S7 | No theme system for Gate 2 | Mel R2 | Keep `BeeChatTheme.swift` as config constants only. |
 | S8 | Dependency table split direct vs transitive | Gav R2 | Direct: Exyte/Chat exact 2.7.10 + local v5. Transitive: Kingfisher, GiphyUISDK, MediaPicker, ActivityIndicatorView, GRDB. |
+| S9 | Add assertion for DB init-order invariant | Q R2 | `assert(persistenceStore != nil)` in ViewModel init. Runtime crash beats silent DB-not-open errors. |
+| S10 | Wrap DB reads in `Task.detached` for MainActor safety | Q R2 | `BeeChatPersistenceStore` methods are synchronous and blocking. `loadCachedData()` on MainActor will block UI. Use `Task.detached` or GRDB `ValueObservation`. |
+| S11 | Delegate callback ordering not guaranteed | Q R2 | `Task { @MainActor in }` is not ordered. Two rapid callbacks may execute in reverse. Accept for Gate 2 (streaming buffer handles ordering). Post-Gate-2: consider `AsyncStream`-based observation. |
+| S12 | Exyte `Message.Status.error` requires `DraftMessage` | Q R2 | Cannot set `.error` directly — must use `.error(DraftMessage(text: originalText))`. This is actually helpful — gives retry text for free. |
+| S13 | `ConnectionState` has no `.reconnecting` — spec UI implies it | Q R2 | v5 has `.connecting` only. Add ViewModel mapping: `retryCount > 0 ? .reconnecting : .connecting`. Requires exposing `GatewayClient.retryCount` or inferring from prior `.connected`. Defer to post-Gate-2 if needed. |
 
 ### Nits (documented, no spec change needed)
 
@@ -805,6 +811,11 @@ The following changes MUST be made before Gate 2A implementation begins. Identif
 | N3 | `BeeChatMobileKit` naming is fine for now | Kieran R2 |
 | N4 | No `[weak self]` in delegate Task closures — acceptable for app-lifecycle ViewModel | Kieran R1 |
 | N5 | Exyte issue #223 — fast insertions cause UI churn. Streaming coalescence already covers this. | Gav R2 |
+| N6 | `BeeChatPersistenceStore` uses synchronous blocking DB methods — all calls block caller thread | Q R2 |
+| N7 | v5 Package.swift uses `swift-tools-version:6.0` with `swiftLanguageVersion(.v5)` per target — confirmed correct | Q R2 |
+| N8 | `ChatHistoryMessage.timestamp` is `TimeInterval` (Double) but v5 `Message.timestamp` is `Date` — MessageMapper needs conversion | Q R2 |
+| N9 | `BeeChatSessionFilter.isBeeChatSession` creates new `TopicRepository()` each call — inefficient but not called in mobile flow | Q R2 |
+| N10 | SyncBridge already uses `ValueObservation` for `messageStream(sessionKey:)` with `scheduling: .mainActor` — perfect for ViewModel subscription | Q R2 |
 
 ---
 

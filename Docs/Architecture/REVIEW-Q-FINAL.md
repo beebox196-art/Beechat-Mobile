@@ -1,153 +1,340 @@
-# Q — Gate 2 Spec Review: Buildability & Complexity Pass
+# Gate 2 Spec Review: Buildability & Complexity
 
+**Reviewer:** Q (Builder)
 **Date:** 2026-05-15
-**Angle:** Buildability, complexity, module structure, v5 integration, file count
-**Verdict:** Mostly buildable, with several simplifications needed for stability and one critical prerequisite fix.
+**Spec:** `GATE2-SPEC.md` (Round 2 — final)
+**Scope:** Buildability, v5 API mismatches, over-engineering, crash paths, build order
 
-## 1. Buildability: Can this be built in the specified sub-gate order?
+I've read the full spec and cross-referenced every claim against the actual v5 source code (`BeeChatPersistence`, `BeeChatGateway`, `BeeChatSyncBridge`) and the current demo (`BeeChatDemoView.swift`).
 
-**Verdict: Mostly yes, with one ordering issue and one missing prerequisite.**
+---
 
-### Sub-gate 2A ordering: ✅ Sound
-- AnyCodable fix → compile Core packages → open GRDB → write test data → render in Exyte. This works. No circular dependencies.
+## BLOCKERS
 
-### Missing prerequisite: The app target isn't an app target yet
-The current `Package.swift` defines `BeeChatMobile` as a **library**, not an executable/app target. The spec says to add `BeeChatMobile` as an executable target (the app), but SPM **cannot build iOS app targets** — you need an Xcode project or a `Package.swift` that uses `xcode` project generation.
+### B1. AnyCodable `Equatable` is broken on iOS — the spec's fix is still wrong
 
-**Fix needed:** The spec needs to clarify that `BeeChatMobile` (the app) will be an Xcode project target, not an SPM target. The SPM package should contain only `BeeChatMobileKit` and `BeeChatUI` as library targets. The Xcode project wraps them. This is the standard iOS app pattern — SPM for libraries, Xcode project for the app. The current project structure (single `BeeChatMobile` library target) needs restructuring anyway, so this is the right time to do it.
+**Source:** `BeeChatGateway/AnyCodable.swift` line 75
 
-### Init order invariant is real but manageable
-The spec correctly identifies that `DatabaseManager.shared.openDatabase(at:)` must be called before `SyncBridge` is created. This is a temporal coupling inherited from v5. The spec documents it with a `⚠️ INIT ORDER INVARIANT` comment, which is the right approach. No code change needed, but the ViewModel's `init` or a setup method needs to enforce this ordering.
-
-### KeychainTokenStore: Already iOS-compatible
-I checked the actual code. `KeychainTokenStore` uses `kSecAttrAccessibleAfterFirstUnlock` which works on both macOS and iOS. No `SecAccessControl` macOS-specific APIs are used. The spec's concern about "macOS `SecAccessControl` may need iOS adjustment" is **not actually an issue** — the implementation uses simple `kSecClassGenericPassword` + `kSecAttrService` + `kSecAttrAccount` which is platform-neutral. Gate 2A's `KeychainTokenStore+iOS.swift` may not be needed at all.
-
-## 2. Unnecessary Complexity
-
-### SyncBridgeDelegateHandler.swift — Unnecessary separate file
-The spec lists `SyncBridgeDelegateHandler.swift` as a new file in the Kit module, but the delegate conformance is naturally part of the ViewModel. In v5, `SyncBridgeObserver` is a single `@MainActor @Observable` class that conforms to `SyncBridgeDelegate`. Splitting the delegate conformance into a separate file adds indirection without benefit — you'd still need to update ViewModel state from the delegate callbacks.
-
-**Recommendation:** Merge the delegate conformance into `BeeChatMobileViewModel.swift` via an extension. This is exactly what v5 does with `SyncBridgeObserver`. One less file, one less indirection.
-
-### Exyte `User` type mismatch
-The spec defines `adamUser` and `beeUser` with the old Exyte `User(id:name:avatarURL:isCurrentUser:)` initializer. The current Exyte Chat code (2.7.10) has changed `User` to use a `type` enum instead of `isCurrentUser: Bool`. The actual initializer is:
+The current implementation:
 ```swift
-User(id: String, name: String, avatarURL: URL?, avatarCacheKey: String? = nil, isCurrentUser: Bool)
-```
-This still works — `isCurrentUser` maps to `type == .current` internally. But the spec should note that `isCurrentUser` is a convenience initializer that sets `UserType.current` or `.other`. Not a blocker, just needs the right initializer call.
-
-**Key issue:** The spec says `name: ""` for beeUser to "avoid avatar initials." This works — Exyte shows no initial when name is empty. Confirmed buildable.
-
-### ConnectionStatusView, OfflineBannerView, EmptyStateView, StreamingIndicatorView — Could merge for MVP
-These are 4 small view files that could be consolidated into 1-2 files for the initial build. `ConnectionStatusView` and `OfflineBannerView` are both connection-state UI — they could be a single `ConnectionViews.swift`. `EmptyStateView` is trivially small. `StreamingIndicatorView` is used only inside `BeeChatView`.
-
-**Recommendation for initial build:** Consolidate to:
-- `ConnectionViews.swift` (status indicator + offline banner)
-- `BeeChatView.swift` (main chat + empty state inline)
-- `StreamingIndicatorView.swift` (keep separate — it has non-trivial state logic)
-
-This saves 2 files and fewer navigation jumps during initial build. Can split later.
-
-### BeeChatMobileConfig — Slightly over-engineered for Gate 2
-The config struct has `clientMode: String` which is always `"mobile"`. For Gate 2 (MVP), a simple `static let development` is sufficient. The full config with optionals for `gatewayURL` and `gatewayToken` is fine, but the `clientMode` field adds no value — `GatewayClient.Configuration` already derives `clientInfo.platform` from `#if os(iOS)`.
-
-**Recommendation:** Drop `clientMode` from `BeeChatMobileConfig`. Let `GatewayClient.Configuration` handle platform detection via its existing `#if os(iOS)` logic.
-
-## 3. Module Split: BeeChatMobileKit + BeeChatUI — correct for MVP
-
-The split aligns with the dependency graph:
-- `BeeChatMobileKit` → no UI dependencies, pure logic layer
-- `BeeChatUI` → depends on ExyteChat + BeeChatMobileKit
-
-This means Kit can be tested without rendering views, UI can be swapped later, and Mel can work on themes while Q works on Kit logic.
-
-**One concern:** The spec says the app accesses `BeeChatMobileKit` **only through** `BeeChatUI` (Kieran's review removed the direct app dependency). This is wrong for the MVP. The app entry point needs to:
-1. Create `BeeChatMobileConfig`
-2. Create `BeeChatMobileViewModel`
-3. Open the database (`DatabaseManager.shared.openDatabase`)
-4. Call `viewModel.loadCachedData()` on launch
-
-All of these are Kit-layer concerns. The app must directly depend on `BeeChatMobileKit`. The dependency graph should be:
-
-```
-BeeChatMobile (app)
-├── BeeChatUI
-│   ├── ExyteChat
-│   └── BeeChatMobileKit
-└── BeeChatMobileKit  ← direct dependency needed
+return NSDictionary(object: lhs.value as Any, forKey: "v" as NSString)
+    .isEqual(to: NSDictionary(object: rhs.value as Any, forKey: "v" as NSString))
 ```
 
-**Fix:** Add `BeeChatMobileKit` as a direct app dependency. Kieran's review was incorrect on this point — the app needs to initialize the ViewModel and config, which are in Kit.
+The spec's corrected fix using `NSNumber` comparison is on the right track but has a **critical bug**: the `NSNumber` case will match `Bool` values before they're caught by the `Bool` case. In Swift, `Bool` bridges to `NSNumber` with `objCType "c"`. The spec tries to guard against this:
 
-## 4. File Count: Revised
+```swift
+case let (a as NSNumber, b as NSNumber):
+    let objCType = String(cString: NSNumber(value: a).objCType)
+    if objCType == "c" || objCType == "B" { return false }  // Skip Bool masquerading as NSNumber
+    return a == b
+```
 
-| File | Verdict | Notes |
-|------|---------|-------|
-| BeeChatMobileConfig.swift | ✅ Keep | Essential config |
-| BeeChatMobileViewModel.swift | ✅ Keep | Core ViewModel |
-| MessageMapper.swift | ✅ Keep | Essential mapping logic |
-| KeychainTokenStore+iOS.swift | ⚠️ Likely unneeded | KeychainStore already iOS-compatible |
-| SyncBridgeDelegateHandler.swift | ❌ Merge | Fold into ViewModel extension |
-| BeeChatView.swift | ✅ Keep | Main chat view |
-| SessionListView.swift | ✅ Keep | Navigation container |
-| ConnectionStatusView.swift | 🔄 Merge | Into ConnectionViews.swift |
-| OfflineBannerView.swift | 🔄 Merge | Into ConnectionViews.swift |
-| EmptyStateView.swift | 🔄 Merge | Inline in BeeChatView |
-| StreamingIndicatorView.swift | ✅ Keep | Has state logic |
-| Theme/BeeChatTheme.swift | ✅ Keep | Theme config |
-| BeeChatMobileApp.swift | ✅ Keep | App entry |
-| Info.plist | ✅ Keep | Required |
+But this is **wrong**: if both values are actually `Bool`, the `Bool` case above will match first, so `return false` here is fine. However, if one value is `Bool` and the other is `Int` (e.g., `true` vs `1`), the `Bool` case won't match (because the `Int` won't match `as Bool`), so we fall through to `NSNumber` — and `NSNumber(value: true).objCType` is `"c"`, which hits the guard and returns `false`. That's correct behavior (`true != 1` in Swift semantics).
 
-**Revised count:** 11-12 new files (merge 3, drop 1). Lean and buildable.
+The **real problem**: the `NSNumber(value: a).objCType` line creates a **new** `NSNumber` from `a`, but `a` is already an `NSNumber`. On iOS, `NSNumber(value: a)` where `a` is already an `NSNumber` may not preserve the original objCType — it could normalize. This needs testing on iOS specifically. If it normalizes to a different type code, the Bool guard breaks.
 
-## 5. v5 Integration Gotchas
+**Recommendation:** Instead of the `NSNumber` approach, use an explicit type-ordered switch that handles `Bool` first, then all integer widths, then floating point:
 
-### 5.1 Swift tools version mismatch — #1 build risk
-The v5 Package.swift uses `swift-tools-version:6.0` with `swiftLanguageVersion(.v5)` per target. The mobile Package.swift uses `swift-tools-version:5.9`. 
+```swift
+case let (a as Bool, b as Bool): return a == b
+case let (a as Int, b as Int): return a == b
+case let (a as Double, b as Double): return a == b
+case let (a as String, b as String): return a == b
+// ... arrays and dicts with recursion
+```
 
-Swift 6.0 package tools version means v5 requires Swift 6.0 toolchain to resolve. The mobile package at 5.9 may or may not work depending on Xcode version. Since the spec targets Xcode 26.x, this should be fine (Xcode 26 ships Swift 6+), but the mobile Package.swift needs to declare `swift-tools-version:6.0` to match v5's requirement, otherwise SPM may refuse to resolve the dependency graph.
+This avoids `NSNumber` entirely and is deterministic. The Swift runtime will match the most specific type first. After JSON decode, all values are `Bool`, `Int`, `Double`, `String`, `[Any]`, or `[String: Any]` — so this covers 100% of real-world values. For programmatically-created `Int64`/`UInt64`, we can add explicit cases, but these don't come through JSON decode.
 
-**Fix:** Update mobile `Package.swift` `swift-tools-version` from `5.9` to `6.0`. Add `swiftLanguageVersion(.v5)` to each target to keep Swift 5 mode (matching v5's approach). This is a safe change — it doesn't change the language, it just declares compatibility.
+**Severity:** Must fix before Gate 2A. The current `NSDictionary.isEqual` will silently produce wrong results on iOS (arrays always equal `false`, some numeric comparisons wrong). The spec's replacement has a subtle iOS-specific risk. Use the type-explicit switch.
 
-### 5.2 AnyCodable fix must not break macOS build
-The spec's NSNumber comparison for `Equatable` is iOS-safe, but v5's macOS app also depends on `AnyCodable`. The fix must be tested against both platforms, not just iOS. The NSNumber bridging works on macOS too (Cocoa bridging is universal), but the test should explicitly cover both paths.
+---
 
-### 5.3 GatewayClient.Configuration initialization
-The spec shows `GatewayClient.Configuration(apiBaseURL:gatewayURL, token:token, clientInfo:.init(platform:"mobile", ...))`. Need to verify this matches the actual v5 API. The `clientInfo` parameter may be a different type or have different field names. Q should check `GatewayClient.swift` directly during Gate 2A.
+### B2. Exyte `User` struct uses `UserType` enum, not `isCurrentUser` boolean
 
-### 5.4 DatabaseManager.shared is a singleton — no injection for testing
-`DatabaseManager.shared` is a hard singleton. The spec doesn't add a protocol abstraction for it, which is correct for the MVP (don't over-abstract), but it means unit tests will hit a real SQLite file. This is acceptable for Gate 2 — add a protocol wrapper later if testing demands it.
+**Source:** Exyte Chat `User.swift`
 
-## 6. Code I'd implement differently
+The spec's `MessageMapper` creates users like:
+```swift
+static let adamUser = ExyteChat.User(id: "adam", name: "Adam", avatarURL: nil, isCurrentUser: true)
+static let beeUser = ExyteChat.User(id: "bee", name: "", avatarURL: nil, isCurrentUser: false)
+```
 
-### ViewModel init pattern
-The spec shows `BeeChatMobileViewModel(config: BeeChatMobileConfig)` as the only initializer. For iOS app lifecycle, the ViewModel should support:
-1. **Designated init with config** — for production use
-2. **Convenience init using UserDefaults/Keychain** — for SwiftUI `@StateObject` creation (which requires parameterless init or init with `@ObservedObject`-compatible parameters)
+This actually works fine — Exyte's `User` has an `init(id:name:avatarURL:avatarCacheKey:isCurrentUser:)` that maps `isCurrentUser` to `type: .current` / `.other` internally. **However**, the spec says "empty name = no avatar initial." This is **incorrect**. Looking at Exyte's avatar rendering, an empty `name` string still renders a circular avatar area — it just shows nothing inside. The correct approach to suppress the "B" avatar initial is to set `avatarURL` to a transparent 1px image URL, OR check if Exyte supports `avatarURL: nil` gracefully (it does — nil avatar + non-empty name shows initials, nil avatar + empty name shows nothing useful but still takes space).
 
-SwiftUI's `@StateObject` creates the object once and persists it. If the ViewModel needs a config at init time, the app needs to pass it through `App` → `WindowGroup` → `ContentView`. This is workable but needs the app entry point to handle config creation before the ViewModel.
+**Actually** the real issue: in the current demo, the assistant message uses `User(id: "bee", name: "Bee", ...)` which shows a "B" initial. The spec says `name: ""` fixes this. But Exyte's `User` with `name: ""` will still render a circle placeholder. We need to verify this renders correctly. If it doesn't, the fallback is a transparent pixel data URL for `avatarURL`.
 
-### StreamingMessage array management
-The spec mentions `@Published var streamingMessages: [String: StreamingMessage]` on the ViewModel. This is correct, but the key should be the message ID (UUID), not the session ID. v5's `StreamingMessageTracker` uses message-level IDs. Using session ID would make it impossible to track multiple simultaneous streams in different sessions.
+**Severity:** Must verify in Gate 2A. Not a code blocker, but a visual bug if wrong. Test on simulator before proceeding.
 
-**Fix:** Key by message ID, not session ID.
+---
 
-## Summary
+### B3. `BeeChatPersistenceStore` is NOT `Sendable` — cross-actor boundary risk
 
-### Must fix before building:
-1. **App target must be Xcode project target, not SPM** — SPM can't build iOS app bundles
-2. **Add BeeChatMobileKit as direct app dependency** — app needs to create ViewModel and Config
-3. **Update mobile Package.swift swift-tools-version to 6.0** — match v5's requirement
-4. **Drop clientMode from BeeChatMobileConfig** — unnecessary, platform detection exists in v5
+**Source:** `BeeChatPersistenceStore.swift`
 
-### Should fix for cleaner build:
-5. **Merge SyncBridgeDelegateHandler into ViewModel extension** — follow v5's pattern
-6. **Merge ConnectionStatusView + OfflineBannerView into ConnectionViews.swift** — reduce file count
-7. **Merge EmptyStateView inline into BeeChatView** — trivial component
-8. **KeychainTokenStore+iOS.swift likely unneeded** — v5's implementation is already iOS-compatible
-9. **StreamingMessages should key by message ID, not session ID** — match v5's StreamingMessageTracker
+`BeeChatPersistenceStore` is a `class` (reference type) with no `Sendable` conformance. `SyncBridge` is an `actor`. The spec passes `BeeChatPersistenceStore` into `SyncBridgeConfiguration` which is a `struct` marked `Sendable`. In Swift 6 strict concurrency, this will emit a warning/error: **"Non-sendable type 'BeeChatPersistenceStore' cannot cross actor boundary."**
 
-### Nits:
-10. **Exyte User initializer uses isCurrentUser convenience init** — works fine, just document it
-11. **DatabaseManager.shared singleton** — fine for MVP, no protocol wrapper needed yet
-12. **File count reduced from 15 to 11-12** — lean and buildable
+`SyncBridgeConfiguration` is marked `Sendable` and holds a `BeeChatPersistenceStore` instance:
+```swift
+public struct SyncBridgeConfiguration: Sendable {
+    public let persistenceStore: BeeChatPersistenceStore  // NOT Sendable
+```
+
+This compiles in Swift 5 language mode (with warnings) but **will be an error in Swift 6**. The spec says to use `swiftLanguageVersion(.v5)` for all targets, so this won't block the build — but it will produce concurrency warnings.
+
+**Severity:** Warning in Swift 5 mode, error in Swift 6. Not a blocker for Gate 2 (Swift 5 language mode), but must be tracked. Fix: make `BeeChatPersistenceStore` `@unchecked Sendable` or wrap it in an actor.
+
+---
+
+### B4. Package.swift has three critical mismatches vs spec
+
+**Source:** `BeeChatMobile/Package.swift`
+
+The current Package.swift:
+1. **`swift-tools-version:5.9`** — spec says must be `6.0` (F4). v5 uses `6.0`.
+2. **Exyte pinned `from: "2.1.0"`** — spec says must be `.exact("2.7.10")` (F1). The `from: "2.1.0"` will resolve to the latest compatible version (currently 3.1.0), which has breaking API changes.
+3. **Single `BeeChatMobile` target** — spec requires splitting into `BeeChatMobileKit` + `BeeChatUI` library targets, with app target in Xcode project.
+
+These are the Round 2 "Must Fix" items F1, F2, F4. The Package.swift as-is will not build correctly with the spec's module structure.
+
+**Severity:** Must fix before any code is written. The Exyte version mismatch alone will cause build failures.
+
+---
+
+### B5. `ConnectionState` has no `.reconnecting` case — spec's UI implies it
+
+**Source:** `BeeChatGateway/ConnectionState.swift`
+
+```swift
+public enum ConnectionState: String, Sendable, Codable {
+    case disconnected, connecting, handshaking, connected, error
+}
+```
+
+The spec's UX section lists UI states: `Offline`, `Connecting`, `Connected`, `Reconnecting`, `Error`. But `ConnectionState` has no `.reconnecting`. The v5 macOS app maps `.connecting` with a retry count to "reconnecting" in the UI. The mobile ViewModel needs a similar mapping or the UI will show "Connecting" during reconnection attempts, which is misleading.
+
+**Severity:** Should fix in ViewModel mapping. Not a v5 change — just add a computed property:
+```swift
+var displayState: ConnectionDisplayState {
+    switch connectionState {
+    case .connecting: return retryCount > 0 ? .reconnecting : .connecting
+    // ...
+    }
+}
+```
+But the ViewModel needs access to `GatewayClient.retryCount`, which is private. Either expose it, or infer `.reconnecting` from `.connecting` after an initial `.connected` has been seen.
+
+**Severity:** Warning. The UI can say "Connecting…" for both, but "Reconnecting" is better UX. Can defer to post-Gate-2.
+
+---
+
+## WARNINGS
+
+### W1. `DatabaseManager.shared` singleton — temporal coupling is fragile
+
+**Source:** `DatabaseManager.swift`
+
+`SyncBridge` initializes `DeliveryLedgerRepository(dbManager: DatabaseManager.shared)` and `Reconciler` in its `init`. If `DatabaseManager.shared.openDatabase(at:)` hasn't been called yet, all DB operations will throw `DatabaseManagerError.notOpen`. The spec documents this as an init-order invariant, but it's a runtime crash waiting to happen — there's no compile-time or assertion guard.
+
+**Recommendation:** Add an assertion in `BeeChatMobileViewModel.init()`:
+```swift
+assert(persistenceStore != nil, "Call openDatabase before creating SyncBridge")
+```
+Or better: make `BeeChatMobileConfig.defaultDatabasePath()` the canonical place to open the DB, and have the ViewModel assert that the DB is open before proceeding.
+
+---
+
+### W2. `SyncBridgeDelegate` callbacks fire on SyncBridge's actor executor
+
+**Source:** `SyncBridgeDelegate.swift`, `SyncBridge.swift`
+
+The spec correctly identifies this (Kieran's finding, marked as #1 crash risk). Every delegate callback (`didUpdateConnectionState`, `didStartStreaming`, etc.) fires inside the `SyncBridge` actor. If the ViewModel conforms to `SyncBridgeDelegate` as a `@MainActor` class, calling `self.connectionState = state` directly from these callbacks is a **data race** — you're writing to a `@MainActor`-isolated property from a non-MainActor context.
+
+The spec's fix (`nonisolated` + `Task { @MainActor in }`) is correct. But it introduces **ordering risk**: `Task { @MainActor in }` is not guaranteed to execute in order. Two rapid delegate callbacks (e.g., `didStartStreaming` then `didStopStreaming` within milliseconds) could have their `Task`s execute in reverse order on MainActor.
+
+**Recommendation:** For Gate 2, accept this risk — streaming start/stop ordering is handled by the streaming buffer anyway. Post-Gate-2, consider `AsyncStream`-based observation where ordering is guaranteed.
+
+---
+
+### W3. `GatewayClient.Configuration.token` is `String` (not optional)
+
+**Source:** `GatewayClient.swift`
+
+```swift
+public let token: String  // NOT optional
+```
+
+The spec's `BeeChatMobileConfig` has `gatewayToken: String?` (optional). But `GatewayClient.Configuration.init` requires a non-optional `token`. The "offline mode" where `gatewayToken` is `nil` cannot create a `GatewayClient` at all.
+
+This is actually correct behavior — you can't connect without a token. But the spec's offline-first flow (Gate 2A) should NOT attempt to create a `GatewayClient` at all. The ViewModel should only create `GatewayClient` + `SyncBridge` when going online.
+
+**Severity:** Warning. The spec's `connect()` code sample creates `GatewayClient` inside the method, which is fine. But the `BeeChatMobileConfig` should document that `gatewayURL` and `gatewayToken` are both required for online mode. The `nil` case means "offline only — don't create Gateway/SyncBridge."
+
+---
+
+### W4. `SyncBridge.init` creates internal dependencies eagerly
+
+**Source:** `SyncBridge.swift` init
+
+```swift
+self.ledgerRepo = DeliveryLedgerRepository(dbManager: DatabaseManager.shared)
+```
+
+This hard-codes `DatabaseManager.shared` inside `SyncBridge.init`. The spec can't inject a different `DatabaseManager` — it must use the shared singleton. This is fine for MVP but means tests can't easily swap the DB.
+
+**Severity:** Nit. Not a blocker. Tests can use in-memory SQLite via `DatabaseManager.shared.openDatabase(at: ":memory:")` (if GRDB supports it — it does via `DatabasePool`). Just be aware that multiple tests sharing `DatabaseManager.shared` will conflict unless each test opens/closes its own DB path.
+
+---
+
+### W5. `Message` model has no `status` field — the spec's optimistic send code is misleading
+
+**Source:** `BeeChatPersistence/Models/Message.swift`
+
+The v5 `Message` struct has no `status` field. The spec's Gate 2C code sample shows:
+```swift
+optimisticMessage.status = .error
+```
+
+This won't compile. `Message` doesn't have a `status` property. The spec's own "Message status mapping" section acknowledges this: "v5 doesn't have explicit delivery status on messages." The fix is to track send status separately in the ViewModel (a dictionary `[(messageId): ExyteChat.Message.Status]`), not by mutating v5's `Message`.
+
+Gav's Round 2 finding (F6) already caught this: "Don't add status to Message. v5's SyncBridge.sendMessage already owns idempotency and delivery ledger." The spec's final action items agree. But the code sample in Gate 2C still shows `optimisticMessage.status = .error`, which is misleading.
+
+**Severity:** Warning. The implementation must NOT try to add a `status` field to v5's `Message`. Track status in the ViewModel's mapping layer instead.
+
+---
+
+### W6. Exyte `Message.Status.error` requires a `DraftMessage` — can't just set `.error`
+
+**Source:** Exyte Chat `Message.swift`
+
+```swift
+public enum Status: Equatable, Hashable, Sendable {
+    case sending, sent, delivered, read
+    case error(DraftMessage)  // NOT just .error
+}
+```
+
+The spec mentions "inline retry affordance" for failed messages, but Exyte's `.error` case requires a `DraftMessage` (containing the text to retry). This is actually helpful — it gives us the retry text for free. But the implementation must create a `DraftMessage` from the failed message text, not just set `.error`.
+
+**Severity:** Warning. Not a blocker, but the ViewModel must map to `Message.Status.error(DraftMessage(text: originalText))` rather than just `.error`. This is actually better than a bare `.error` state.
+
+---
+
+### W7. `BeeChatPersistenceStore` uses synchronous DB methods — all calls are blocking
+
+**Source:** `BeeChatPersistenceStore.swift`
+
+Methods like `fetchSessions(limit:offset:)`, `upsertSessions(_:)`, `saveMessage(_:)` are all synchronous `throws` functions. When called from `@MainActor` ViewModel, they'll block the main thread.
+
+`SyncBridge` (an actor) calls these from its own executor, which is fine. But the ViewModel's `loadCachedData()` (Gate 2A offline path) calls `persistenceStore.fetchSessions()` directly — this runs on MainActor and blocks the UI.
+
+**Recommendation:** Wrap DB reads in `Task.detached` for Gate 2:
+```swift
+func loadCachedSessions() async {
+    let sessions = await Task.detached {
+        try? self.persistenceStore.fetchSessions(limit: 100, offset: 0)
+    }.value
+    self.sessions = sessions ?? []
+}
+```
+Or use GRDB's `ValueObservation` (Gav's S6 recommendation) which is async-friendly.
+
+---
+
+## NITS
+
+### N1. `BeeChatMobileConfig.defaultDatabasePath()` uses force-unwrap
+
+**Spec code:**
+```swift
+let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+```
+
+On iOS this will never be nil, but defensive coding says use `guard let` with a fallback. Not a real risk on iOS.
+
+---
+
+### N2. `ChatHistoryMessage.timestamp` is `TimeInterval` (Double), but v5 `Message.timestamp` is `Date`
+
+**Source:** `GatewayRPCResponses.swift` — `ChatHistoryMessage.timestamp: TimeInterval`
+**Source:** `BeeChatPersistence/Models/Message.swift` — `Message.timestamp: Date`
+
+The spec's `MessageMapper` will need `Date(timeIntervalSince1970: historyMessage.timestamp)`. The existing `SyncBridge.fetchHistory` already does this conversion. Not a bug, just something to be aware of.
+
+---
+
+### N3. `SessionInfo.totalTokens` is `Int?`, but `SyncBridge.fetchSessions` passes it to `Session.totalTokens: Int?`
+
+This is correct — both are `Int?`. No mismatch. Just noting for completeness.
+
+---
+
+### N4. Demo `BeeChatDemoView.swift` uses `DispatchQueue.main.asyncAfter` for streaming
+
+The current demo simulates streaming with `Timer.scheduledTimer`. The real implementation will use `SyncBridge.streamingContent(for:)` polling. The demo code will be deleted entirely (replaced by `BeeChatView` + ViewModel), so this isn't a concern.
+
+---
+
+### N5. `SyncBridge.messageStream(sessionKey:)` uses `ValueObservation` with `scheduling: .mainActor`
+
+**Source:** `SyncBridge.swift`
+
+This is perfect for the mobile ViewModel — it already delivers DB changes on MainActor. The ViewModel should subscribe to this stream rather than polling. This is exactly Gav's S6 recommendation. Use it.
+
+---
+
+### N6. v5 `Package.swift` uses `swift-tools-version:6.0` with `swiftLanguageVersion(.v5)` per target
+
+The mobile Package.swift must match. The spec says `6.0` — confirmed correct.
+
+---
+
+### N7. `BeeChatSessionFilter.isBeeChatSession` creates a new `TopicRepository()` each call
+
+**Source:** `SessionKeyNormalizer.swift`
+
+This creates a new `TopicRepository()` (which uses `DatabaseManager.shared`) on every call. For the mobile app, topics aren't used (no topic-based sessions). This function won't be called in the mobile flow, so it's fine. But if it is called, it's inefficient.
+
+---
+
+## BUILD ORDER ASSESSMENT
+
+The spec's sub-gate structure (2A→2B→2C→2D) is correct and well-sequenced:
+
+1. **Gate 2A** (offline DB) is properly isolated — no network needed, tests pure data flow
+2. **Gate 2B** (live connection) builds on 2A by adding `SyncBridge` lifecycle
+3. **Gate 2C** (send/receive) builds on 2B by adding outbound message flow
+4. **Gate 2D** (reconnect) builds on 2C by adding resilience
+
+Each gate has clear exit criteria that can be verified on simulator.
+
+The module structure (`BeeChatMobileKit` → `BeeChatUI` → App) is correct. The dependency graph is acyclic and each layer has a clear responsibility.
+
+---
+
+## SUMMARY
+
+| Category | Count | Items |
+|----------|-------|-------|
+| **BLOCKER** | 2 | B1 (AnyCodable fix still has risk), B4 (Package.swift must-fix mismatches) |
+| **BLOCKER (verify)** | 1 | B2 (Exyte avatar with empty name — test on simulator) |
+| **BLOCKER (deferred)** | 1 | B3 (PersistenceStore not Sendable — Swift 5 warnings OK, Swift 6 error) |
+| **WARNING** | 7 | W1-W7 (temporal coupling, callback ordering, token non-optional, eager init, Message.status, Exyte error type, blocking DB) |
+| **NIT** | 7 | N1-N7 |
+
+### Must-fix before coding starts:
+1. **Fix Package.swift** — swift-tools-version 6.0, Exyte exact pin 2.7.10, split into Kit + UI targets
+2. **Fix AnyCodable** — use type-explicit switch, not NSNumber comparison
+3. **Don't add `status` to v5 Message** — track in ViewModel mapping layer
+4. **App target must be Xcode project** — SPM can't build iOS app bundles
+
+### Must-verify on first simulator run:
+1. **Exyte empty-name avatar** — confirm `name: ""` suppresses the "B" initial, or use transparent pixel URL
+
+### Can defer to post-Gate-2:
+1. `BeeChatPersistenceStore` Sendable conformance
+2. `.reconnecting` UI state (just show "Connecting…" for both)
+3. `ValueObservation` for session/message lists (manual refresh works for MVP)
+4. Topic-based session filtering (mobile uses gateway keys directly)
+
+The spec is solid. The architecture is sound. The v5 Core packages are well-structured and the bridge pattern is correct. The main risks are the known AnyCodable bug and Package.swift mismatches — both are fixable before any code is written. After those fixes, Gate 2A should compile and run on the first attempt.
