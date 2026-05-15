@@ -1,6 +1,7 @@
 import SwiftUI
 import BeeChatPersistence
 import BeeChatMobileKit
+import BeeChatGateway
 
 public struct SessionListView: View {
     @State public var viewModel: BeeChatMobileViewModel
@@ -20,6 +21,12 @@ public struct SessionListView: View {
                 }
             }
             .navigationTitle("Sessions")
+            // B4: Show offline banner when disconnected
+            .overlay(alignment: .top) {
+                if viewModel.connectionState == .disconnected {
+                    OfflineBannerView()
+                }
+            }
         } detail: {
             if let sessionId = viewModel.selectedSessionId {
                 BeeChatView(viewModel: viewModel)
@@ -29,6 +36,15 @@ public struct SessionListView: View {
                 Text("Select a session")
                     .foregroundStyle(.secondary)
             }
+        }
+        // B3: Display errors to the user
+        .alert("Error", isPresented: Binding(
+            get: { viewModel.currentError != nil },
+            set: { if !$0 { viewModel.currentError = nil } }
+        )) {
+            Button("OK") { viewModel.currentError = nil }
+        } message: {
+            Text(viewModel.currentError?.localizedDescription ?? "Unknown error")
         }
     }
 }

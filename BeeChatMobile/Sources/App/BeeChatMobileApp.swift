@@ -10,10 +10,11 @@ struct BeeChatMobileApp: App {
         WindowGroup {
             SessionListView(viewModel: viewModel)
                 .task {
-                    try? await viewModel.start()
-                    // Auto-select first session for Gate 2A verification
-                    if viewModel.selectedSessionId == nil, let first = viewModel.sessions.first {
-                        viewModel.selectedSessionId = first.id
+                    // B2 fix: Catch and propagate errors instead of try?
+                    do {
+                        try await viewModel.start()
+                    } catch {
+                        viewModel.currentError = error
                     }
                 }
         }

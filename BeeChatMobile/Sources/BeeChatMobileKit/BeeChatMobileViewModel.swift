@@ -41,7 +41,7 @@ public final class BeeChatMobileViewModel {
     }
 
     public func send(text: String, to sessionId: String) async throws {
-        // Gate 2A: write outgoing message to local DB immediately
+        // Write outgoing message to local DB (optimistic, no network yet)
         let idempotencyKey = UUID().uuidString
         let msg = BeeChatPersistence.Message(
             id: idempotencyKey,

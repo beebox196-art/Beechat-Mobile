@@ -15,13 +15,19 @@ public struct BeeChatMobileConfig: Sendable {
         historyFetchLimit: Int = 200,
         reconnectDebounceSeconds: Double = 1.0
     ) {
+        // W7 fix: guard let instead of force-unwrap
         if let dbPath {
             self.dbPath = dbPath
         } else {
-            let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            let dir = appSupport.appendingPathComponent("BeeChat", isDirectory: true)
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            self.dbPath = dir.appendingPathComponent("beechat.db").path
+            let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            let dir = appSupport?.appendingPathComponent("BeeChat", isDirectory: true)
+            if let dir {
+                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                self.dbPath = dir.appendingPathComponent("beechat.db").path
+            } else {
+                // Fallback: documents directory (should never happen on iOS)
+                self.dbPath = "beechat.db"
+            }
         }
         self.gatewayURL = gatewayURL
         self.historyFetchLimit = historyFetchLimit
