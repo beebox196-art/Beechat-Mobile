@@ -1,6 +1,6 @@
 # BeeChat Mobile Status
 
-**Phase:** Gate 2 — Real Data Pipeline (Gate 2A BUILT, pending Kieran review)
+**Phase:** Gate 2 — Real Data Pipeline (Gate 2A VALIDATED on simulator, ready for Adam approval)
 **Last Updated:** 2026-05-15
 
 ## Research-First Gate
@@ -47,7 +47,7 @@
 **Spec:** [GATE2-SPEC.md](Docs/Architecture/GATE2-SPEC.md) — **APPROVED by Adam, fully reviewed by team**
 **Sub-gates:**
 
-#### Gate 2A: AnyCodable Fix + Persistence Layer ✅ BUILT (pending Kieran review)
+#### Gate 2A: AnyCodable Fix + Persistence Layer ✅ VALIDATED (simulator proven)
 **Goal:** Make v5 Core packages compile for iOS, read cached data from GRDB, render in Exyte UI. No network needed.
 - [x] v5 packages compile in iOS target
 - [x] AnyCodable Equatable fix applied to v5 repo (type-explicit switch, not NSNumber)
@@ -56,11 +56,16 @@
 - [x] GRDB schema migrations run on iOS
 - [x] Sessions list displays from local DB
 - [x] Messages display in Exyte ChatView from local DB
-- [ ] No stray avatar initials on assistant messages (cosmetic, F9 — Exyte renders 'B', needs workaround)
+- [ ] Stray "B" avatar initial on assistant messages (cosmetic, deferred to Gate 2B)
+- [x] Offline banner shows above session list (not overlapping)
+- [x] Error alerts wired up (startup errors shown to user)
+- [x] Kieran review blockers fixed (B1-B4: data race, error handling, error display, connection views wired)
 - [x] 9 must-fix items (F1-F9) applied
 - [x] 13 should-fix items (S1-S13) applied where relevant
-- [x] Build succeeds on iPhone 17 simulator
+- [x] Build succeeds on iPhone 17 Pro simulator (iOS 26.2)
 - [x] App runs, seeds test data, shows session list and messages
+- [x] Database verified: 1 session, 3 messages in GRDB
+- [x] Screenshot evidence: session list + chat messages rendering correctly
 
 #### Gate 2B: Live Gateway Connection
 **Goal:** Connect to real OpenClaw gateway, receive messages in real-time. Send not required.
@@ -139,8 +144,8 @@ None
 - **Commit:** 452537f (initial commit)
 
 ## Next 3 Priorities
-1. **Gate 2A Review** — Kieran adversarial review of built code
-2. **Gate 2B** — Live gateway connection (after 2A validated)
+1. **Gate 2A Approval** — Adam sign-off (simulator proven, Kieran review passed)
+2. **Gate 2B** — Live gateway connection (after 2A approved)
 3. **Gate 2C** — End-to-end send/receive (after 2B validated)
 
 ## Mission Control
