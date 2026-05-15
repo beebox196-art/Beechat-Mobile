@@ -1,7 +1,7 @@
 # BeeChat Mobile Status
 
-**Phase:** Phase 0 — Validation
-**Last Updated:** 2026-05-12
+**Phase:** Phase 0 — Validation (Gate 1 complete, Gate 2 next)
+**Last Updated:** 2026-05-15
 
 ## Research-First Gate
 - [x] Phase 0 Prior Art Survey complete
@@ -40,7 +40,7 @@
 - [x] No showstoppers in 1 day — SwiftyChat fallback not needed
 
 **Spike report:** `Docs/Architecture/GATE1-SPIKE-REPORT.md`
-**⚠️ Manual verification needed:** Open project in Xcode, run on simulator, confirm visual rendering
+**✅ Manual verification done:** App builds and runs on iPhone 17 simulator (iOS 26.2). Two hardcoded messages render with proper bubbles, input bar with attach/emoji/camera/mic buttons, streaming text timer working. Stray "B" avatar initial on assistant messages (cosmetic, not blocker).
 
 ### Gate 2: Real Data Pipeline
 **Goal:** Connect Exyte UI to real BeeChat data through Core packages.
@@ -82,10 +82,15 @@
 ## Active Blockers
 None
 
+## Git
+- **Remote:** https://github.com/beebox196-art/Beechat-Mobile
+- **Branch:** main
+- **Commit:** 452537f (initial commit)
+
 ## Next 3 Priorities
-1. **Gate 1 manual verification** — Adam opens project in Xcode, runs on simulator, confirms visual rendering
-2. **Gate 2: Real Data Pipeline** — Wire BeeChat Core packages to Exyte UI for real gateway data
-3. **Gate 2: Validate** — Messages from gateway render, sent messages reach gateway end-to-end
+1. **Gate 2: Real Data Pipeline** — Wire BeeChat Core packages to Exyte UI for real gateway data
+2. **Gate 2: Validate** — Messages from gateway render, sent messages reach gateway end-to-end
+3. **AnyCodable fix** — Resolve v5 AnyCodable.swift iOS compilation issue when wiring real data
 
 ## Mission Control
 - Task: [To be created]
