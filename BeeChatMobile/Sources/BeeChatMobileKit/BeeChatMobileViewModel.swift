@@ -34,6 +34,11 @@ public final class BeeChatMobileViewModel {
 
         // Load initial sessions from local DB
         self.sessions = try persistenceStore.fetchSessions(limit: 100, offset: 0)
+
+        // Auto-select first session for verification
+        if selectedSessionId == nil, let first = sessions.first {
+            selectedSessionId = first.id
+        }
     }
 
     public func messages(for sessionId: String) throws -> [BeeChatPersistence.Message] {

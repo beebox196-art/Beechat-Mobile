@@ -12,21 +12,21 @@ public struct SessionListView: View {
 
     public var body: some View {
         NavigationSplitView {
-            List(viewModel.sessions, id: \.id, selection: Binding(
-                get: { viewModel.selectedSessionId },
-                set: { viewModel.selectedSessionId = $0 }
-            )) { session in
-                NavigationLink(value: session.id) {
-                    SessionRow(session: session)
-                }
-            }
-            .navigationTitle("Sessions")
-            // B4: Show offline banner when disconnected
-            .overlay(alignment: .top) {
+            VStack(spacing: 0) {
+                // B4: Show offline banner when disconnected
                 if viewModel.connectionState == .disconnected {
                     OfflineBannerView()
                 }
+                List(viewModel.sessions, id: \.id, selection: Binding(
+                    get: { viewModel.selectedSessionId },
+                    set: { viewModel.selectedSessionId = $0 }
+                )) { session in
+                    NavigationLink(value: session.id) {
+                        SessionRow(session: session)
+                    }
+                }
             }
+            .navigationTitle("Sessions")
         } detail: {
             if let sessionId = viewModel.selectedSessionId {
                 BeeChatView(viewModel: viewModel)
