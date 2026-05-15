@@ -1,26 +1,31 @@
 name: BeeChatMobile
+
 targets:
   BeeChatMobile:
     type: application
     platform: iOS
     deploymentTarget: "17.0"
     sources:
-      - Sources/BeeChatMobile
+      - Sources/App
+      - Sources/BeeChatMobileKit
+      - Sources/BeeChatUI
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: "com.ambox.beechatmobile"
-        INFOPLIST_FILE: Sources/BeeChatMobile/Info.plist
-        SWIFT_VERSION: "5.9"
+        INFOPLIST_FILE: Sources/App/Info.plist
+        SWIFT_VERSION: "5.0"
     dependencies:
       - package: Chat
         product: ExyteChat
+      - package: BeeChat-v5
+        product: BeeChatPersistence
+      - package: BeeChat-v5
+        product: BeeChatGateway
+      - package: BeeChat-v5
+        product: BeeChatSyncBridge
 packages:
   Chat:
     url: https://github.com/exyte/Chat
-    from: 2.1.0
-  BeeChatPersistence:
-    path: ../../BeeChat-v5
-  BeeChatGateway:
-    path: ../../BeeChat-v5
-  BeeChatSyncBridge:
+    exactVersion: 2.7.10
+  BeeChat-v5:
     path: ../../BeeChat-v5

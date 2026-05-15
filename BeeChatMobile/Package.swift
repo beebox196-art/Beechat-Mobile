@@ -1,30 +1,43 @@
-// swift-tools-version:5.9
+// swift-tools-version:6.0
 import PackageDescription
 
 let package = Package(
     name: "BeeChatMobile",
     platforms: [
-        .macOS(.v14),
-        .iOS(.v17)
+        .iOS(.v17),
+        .macOS(.v14)
     ],
     products: [
         .library(
-            name: "BeeChatMobile",
-            targets: ["BeeChatMobile"]),
+            name: "BeeChatMobileKit",
+            targets: ["BeeChatMobileKit"]),
+        .library(
+            name: "BeeChatUI",
+            targets: ["BeeChatUI"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/exyte/Chat", from: "2.1.0"),
+        .package(url: "https://github.com/exyte/Chat", exact: "2.7.10"),
         .package(path: "../../BeeChat-v5"),
     ],
     targets: [
         .target(
-            name: "BeeChatMobile",
+            name: "BeeChatMobileKit",
             dependencies: [
-                .product(name: "ExyteChat", package: "Chat"),
                 .product(name: "BeeChatPersistence", package: "BeeChat-v5"),
                 .product(name: "BeeChatGateway", package: "BeeChat-v5"),
                 .product(name: "BeeChatSyncBridge", package: "BeeChat-v5"),
             ],
-            path: "Sources/BeeChatMobile"),
+            path: "Sources/BeeChatMobileKit",
+            swiftSettings: [.swiftLanguageVersion(.v5)]
+        ),
+        .target(
+            name: "BeeChatUI",
+            dependencies: [
+                .product(name: "ExyteChat", package: "Chat"),
+                .target(name: "BeeChatMobileKit"),
+            ],
+            path: "Sources/BeeChatUI",
+            swiftSettings: [.swiftLanguageVersion(.v5)]
+        ),
     ]
 )
