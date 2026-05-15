@@ -79,6 +79,21 @@
 
 ---
 
+## Team Development Process
+
+See [ADR-002](Docs/Decisions/ADR-002-team-driven-development.md) for full details.
+
+| Role | Agent | Responsibility |
+|---|---|---|
+| **Coordinator** | Bee | Orchestrates gates, validates deliverables, updates STATUS, manages git |
+| **Builder** | Q | All code implementation — Swift, SPM, iOS, UI wiring |
+| **Reviewer** | Kieran | Adversarial review of every gate deliverable before it passes |
+| **Designer** | Mel | UI/UX design decisions, visual polish, SwiftUI layout guidance |
+| **Researcher** | Gav | Prior art, library evaluation, technical evidence gathering |
+
+**Gate workflow:** Bee defines criteria → Q implements → Kieran reviews → Q fixes → Bee validates → Adam approves.
+**No gate passes without Kieran sign-off.**
+
 ## Active Blockers
 None
 
