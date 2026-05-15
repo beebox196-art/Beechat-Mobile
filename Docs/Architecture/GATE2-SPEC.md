@@ -9,7 +9,7 @@
 | Reviewer | Status | Key Findings |
 |----------|--------|-------------|
 | Kieran | ✅ Complete | 2 blockers (AnyCodable, error handling), 4 warnings (threading, temporal coupling, dependency graph, in-flight sends), 2 nits |
-| Mel | 🔄 In progress | — |
+| Mel | ✅ Complete | Adaptive NavigationSplitView, toolbar status indicator, offline banner, typing indicator before streaming, inline error states |
 | Gav | ✅ Complete | URLSessionWebSocketTask ✅, Exyte 3.1.0 breaking changes ⚠️, Keychain raw Security ✅, actor/MainActor bridge ✅, GRDB 7.10.0 ✅, one local package with two targets recommended |
 | Q | ⏳ Pending | — |
 
@@ -116,7 +116,7 @@ The only new code is the **bridge** between v5's actor-based Core packages and S
 6. Tapping a session shows its messages in Exyte ChatView
 7. No network connection required or attempted
 
-**Module structure:**
+**Module structure:** *(Updated with Mel's design recommendations)*
 ```
 BeeChatMobile/Sources/BeeChatMobileKit/
 ├── BeeChatMobileConfig.swift       # iOS-specific config (DB path, gateway URL)
@@ -126,8 +126,11 @@ BeeChatMobile/Sources/BeeChatMobileKit/
 
 BeeChatMobile/Sources/BeeChatUI/
 ├── BeeChatView.swift              # Main chat view wrapping Exyte ChatView
-├── SessionListView.swift          # Sessions sidebar/list
-├── ConnectionStatusView.swift     # Connection indicator
+├── SessionListView.swift          # Adaptive NavigationSplitView (sidebar iPad, push/pop iPhone)
+├── ConnectionStatusView.swift     # Toolbar indicator: Offline/Connecting/Connected/Reconnecting/Error
+├── OfflineBannerView.swift        # Non-blocking banner: "Offline. Showing cached messages."
+├── EmptyStateView.swift           # No sessions / no messages states
+├── StreamingIndicatorView.swift   # Typing indicator before first delta, replaced by streaming bubble
 └── Theme/
     └── BeeChatTheme.swift          # ExyteChat theme configuration
 
@@ -409,13 +412,16 @@ SyncBridge already manages a `streamingBuffer` and `streamingSessionKeys`. The V
 
 **Review checklist for Gate 2B:**
 - [ ] Gateway connects on launch (auto-connect)
-- [ ] Connection state indicator updates in real-time
+- [ ] Connection state indicator updates in real-time (toolbar: Offline/Connecting/Connected/Reconnecting/Error)
 - [ ] `.error` state set on auth failure, unreachable gateway, etc.
 - [ ] Error message propagated to UI (not just `.disconnected`)
+- [ ] Offline banner shows over cached data: "Offline. Showing cached messages." + retry
+- [ ] Typing indicator appears before first streaming delta
 - [ ] Incoming messages appear in chat without manual refresh
-- [ ] Streaming text updates character-by-character
+- [ ] Streaming text updates character-by-character (coalesced, not per-token)
 - [ ] Session list refreshes when `sessions.changed` fires
 - [ ] Reconnection works after brief disconnect (5-10 seconds)
+- [ ] "Syncing..." state visible on foreground reconnect
 - [ ] Cached data shows immediately on launch before connection
 - [ ] Gateway token NOT committed to repo
 - [ ] No force-unwraps on optional network responses
@@ -543,7 +549,62 @@ The ViewModel needs to:
 
 ---
 
-## 5. Testing Strategy
+## 5. UX Patterns (Mel's Design Guidance)
+
+These decisions apply across all sub-gates and define the mobile UX language.
+
+### 5.1 Navigation
+- **Adaptive `NavigationSplitView`** — sidebar on iPad, push/pop on iPhone
+- Follows iOS HIG adaptive navigation pattern
+- Avoids separate layout logic per device
+
+### 5.2 Connection Status
+- **Toolbar indicator** with icon + text (not dot-only)
+- States: `Offline`, `Connecting`, `Connected`, `Reconnecting`, `Error`
+- Tappable — reveals error detail / retry action
+
+### 5.3 Offline UX
+- **Cached data + non-blocking banner** (not full-screen error)
+- Banner: "Offline. Showing cached messages." with retry button
+- Full-screen error only if no cached sessions exist
+- Offline feels intentional, not broken
+
+### 5.4 Streaming Text
+- **Typing indicator before first delta**, replaced by streaming bubble on first character
+- Prevents dead pause after send
+- Coalesce UI updates (every 2-3 tokens, not per-token)
+
+### 5.5 Message Status
+- Use Exyte built-in plumbing for `sending/sent/error`
+- **Customise failed state** with inline retry affordance on the bubble
+- Don't overbuild read receipts yet
+
+### 5.6 Error States
+- **Send failure:** inline on message bubble + retry button
+- **Connection/auth failure:** top banner or toolbar disclosure
+- **Alerts only** for destructive actions (session reset)
+- **No modals** for routine network issues
+
+### 5.7 Empty States
+- **No sessions:** centered "No conversations yet" + primary "Start Chat" button
+- **No messages:** lightweight prompt in chat detail, focused on starting the first message
+- Quiet, native, useful — not decorative
+
+### 5.8 Interrupted Streams
+- Replace spinner with "Response interrupted" text
+- Show retry/regenerate affordance
+- Don't leave a hanging typing indicator
+
+### 5.9 Foreground Reconnect
+- On app resume, show brief "Syncing..." state in toolbar
+- Reconcile via SyncBridge, then clear
+
+### 5.10 Accessibility (noted for future, not Gate 2 blocker)
+- Dynamic Type support
+- VoiceOver labels for key actions
+- Reduce Motion support for streaming animations
+
+## 6. Testing Strategy
 
 ### 5.1 Unit Tests
 
@@ -603,6 +664,9 @@ BeeChatMobile/Sources/BeeChatUI/
 ├── BeeChatView.swift
 ├── SessionListView.swift
 ├── ConnectionStatusView.swift
+├── OfflineBannerView.swift
+├── EmptyStateView.swift
+├── StreamingIndicatorView.swift
 └── Theme/BeeChatTheme.swift
 
 BeeChatMobile/Sources/App/
@@ -665,11 +729,15 @@ BeeChatMobile/Sources/BeeChatMobile/BeeChatDemoView.swift  # Replaced by BeeChat
 5. **NEW:** `SyncBridgeDelegate` callbacks MUST be `nonisolated` with `Task { @MainActor in }`. This is the #1 crash risk.
 6. **NEW:** Package graph has duplicate `BeeChatMobileKit` dependency — removed direct app dependency, kept transitive.
 
-### Q to Mel (Designer) — 🔄 Awaiting response:
-1. Session list: sidebar vs push/pop vs adaptive?
-2. Connection status indicator placement?
-3. Offline state UX?
-4. Streaming text UX?
+### Q to Mel (Designer) — ✅ Received:
+1. **Session list:** Adaptive `NavigationSplitView`. iPad: persistent sidebar. iPhone: push/pop list → chat detail. Matches iOS HIG, avoids separate layout logic.
+2. **Connection status:** Compact labeled indicator in chat toolbar. States: `Offline`, `Connecting`, `Connected`, `Reconnecting`, `Error`. Icon + text (not dot-only). Tap reveals error detail / retry.
+3. **Offline UX:** Cached data with non-blocking banner ("Offline. Showing cached messages." + retry). Full-screen error only if no cached sessions exist. Make offline feel intentional, not broken.
+4. **Streaming text:** Show typing indicator before first delta. Replace with streaming bubble on first delta. Prevents dead pause after send.
+5. **Message status:** Use Exyte built-in plumbing for `sending/sent/error`. Customise failed state with inline retry affordance. Don't overbuild read receipts yet.
+6. **Error states:** Inline and banner preferred. Send failure = inline on bubble + retry. Connection/auth failure = top banner / toolbar disclosure. Alerts only for destructive actions (session reset). No modals for routine network issues.
+7. **Empty states:** No sessions = centered "No conversations yet" + primary "Start Chat" button. No messages = lightweight prompt in chat detail. Quiet, native, useful.
+8. **Missed items:** (a) Foreground reconnect with visible "syncing" state after app resume. (b) Pull-to-refresh / retry for reconciliation. (c) Keyboard-safe composer with long-message input growth. (d) Dynamic Type, VoiceOver, Reduce Motion for streaming. (e) Interrupted streams: "Response interrupted" + retry/regenerate affordance.
 
 ### Q to Gav (Researcher) — ✅ Received:
 1. **WebSocket:** `URLSessionWebSocketTask` is the right choice for iOS 17+. Native, `Sendable`, async-capable. Keep v5 implementation. **Caveat:** WebSocket won't survive background suspension — reconnect on foreground + reconcile via SyncBridge. No alternative needed. (Confidence: high)
