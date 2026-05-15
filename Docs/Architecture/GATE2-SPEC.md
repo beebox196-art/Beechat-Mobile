@@ -10,7 +10,7 @@
 |----------|--------|-------------|
 | Kieran | ✅ Complete | 2 blockers (AnyCodable, error handling), 4 warnings (threading, temporal coupling, dependency graph, in-flight sends), 2 nits |
 | Mel | 🔄 In progress | — |
-| Gav | 🔄 In progress | — |
+| Gav | ✅ Complete | URLSessionWebSocketTask ✅, Exyte 3.1.0 breaking changes ⚠️, Keychain raw Security ✅, actor/MainActor bridge ✅, GRDB 7.10.0 ✅, one local package with two targets recommended |
 | Q | ⏳ Pending | — |
 
 ---
@@ -27,13 +27,15 @@ This spec breaks Gate 2 into four sub-gates (2A→2B→2C→2D), each independen
 
 ### 2.1 Modularity First
 
-Every component must be a **standalone Swift package or module** with a clear public API, not a monolithic file. This is non-negotiable.
+Every component must be a **standalone module with a clear public API**, not a monolithic file. This is non-negotiable.
 
 **Why:**
 - Reuse without rewrites — if we find a better markdown renderer, we swap one module, not refactor a 500-file view
 - Test in isolation — each module can have its own test target
 - Parallel development — Q can work on the ViewModel while Mel works on themes without merge conflicts
 - Swapability — Exyte/Chat is our UI today, but a future SwiftUI-native chat view should be a drop-in replacement for one module, not a rewrite
+
+**Gav's recommendation:** Use **one local package with two library targets** (`BeeChatMobileKit` + `BeeChatUI`) rather than two separate packages. This preserves modularity without Xcode resolution complexity. The app target stays thin.
 
 **Module boundaries:**
 
@@ -321,6 +323,8 @@ extension BeeChatMobileConfig {
 
 **Note:** The token MUST NOT be committed to the repo. It should be read from a `.env` file or Xcode scheme environment variable at build time. The `.gitignore` must exclude config files containing tokens.
 
+**Gav's research note:** `URLSessionWebSocketTask` is confirmed as the right choice for iOS 17+. WebSocket won't survive background suspension — the correct pattern is reconnect on foreground and reconcile via SyncBridge. This is already how v5 works. No alternative WebSocket library needed. For Keychain token storage, raw Security framework is fine for Gate 2 (v5 already has `KeychainTokenStore`). Use `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` since we need token access for background reconnect. Only adopt Valet if iOS adaptation gets nontrivial.
+
 **Connection lifecycle:**
 ```swift
 // In BeeChatMobileViewModel
@@ -400,6 +404,8 @@ extension BeeChatMobileViewModel: SyncBridgeDelegate {
 
 **Streaming text binding:**
 SyncBridge already manages a `streamingBuffer` and `streamingSessionKeys`. The ViewModel polls `syncBridge.streamingContent(for:)` during streaming and maps it to the Exyte `Message` text.
+
+**Gav's performance note:** For token streaming, coalesce UI updates and avoid per-token full message-array churn. The current `@State` array + element replacement pattern from Gate 1 should work, but if performance degrades, consider throttling updates to every 2-3 tokens rather than every single delta.
 
 **Review checklist for Gate 2B:**
 - [ ] Gateway connects on launch (auto-connect)
@@ -628,7 +634,7 @@ BeeChatMobile/Sources/BeeChatMobile/BeeChatDemoView.swift  # Replaced by BeeChat
 ### External (SPM)
 | Dependency | Version | Purpose |
 |------------|---------|---------|
-| Exyte/Chat | 2.7.10+ | Chat UI framework (bubbles, input bar, streaming) |
+| Exyte/Chat | 2.7.10 (pin for Gate 2) ⚠️ | Chat UI framework (bubbles, input bar, streaming). Latest is 3.1.0 with breaking changes — pin 2.7.10 and upgrade separately after pipeline works. |
 | GRDB | 7.0.0+ | Local SQLite persistence (via BeeChatPersistence) |
 | Kingfisher | 8.x | Image loading/caching (transitive via Exyte) |
 
@@ -665,13 +671,13 @@ BeeChatMobile/Sources/BeeChatMobile/BeeChatDemoView.swift  # Replaced by BeeChat
 3. Offline state UX?
 4. Streaming text UX?
 
-### Q to Gav (Researcher) — 🔄 Awaiting response:
-1. WebSocket libraries comparison for iOS?
-2. Exyte/Chat latest version and breaking changes?
-3. Keychain: raw Security framework vs Valet library?
-4. Swift Concurrency actor + @MainActor bridging gotchas?
-5. GRDB on iOS known issues?
-6. SPM modular structure assessment?
+### Q to Gav (Researcher) — ✅ Received:
+1. **WebSocket:** `URLSessionWebSocketTask` is the right choice for iOS 17+. Native, `Sendable`, async-capable. Keep v5 implementation. **Caveat:** WebSocket won't survive background suspension — reconnect on foreground + reconcile via SyncBridge. No alternative needed. (Confidence: high)
+2. **Exyte/Chat version:** Latest tag is **3.1.0** (we're on 2.7.10). **38 commits ahead with breaking changes:** `scrollToMessage` → `scrollTo`, new view-builder param structs, dependency bumps (MediaPicker 3.2.4→3.3.0, ActivityIndicatorView 1.0→2.0). **Recommendation:** Pin 2.7.10 for Gate 2, upgrade to 3.1.0 as a separate task after core pipeline works. No streaming performance issues found, but coalesce UI updates and avoid per-token full message-array churn. (Confidence: medium-high)
+3. **Keychain:** Raw Security framework is fine for Gate 2. v5's `KeychainTokenStore` works. Use `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` for background reconnect, or `WhenUnlockedThisDeviceOnly` for foreground-only. Keep Keychain work off MainActor. Only adopt Valet (5.1.0) if iOS adaptation gets nontrivial. (Confidence: high)
+4. **Swift Concurrency:** The `actor` → `@MainActor @Observable` bridge pattern is sound. Kieran's `nonisolated` + `Task { @MainActor in }` fix is correct. **Key rules:** Don't pass mutable non-Sendable reference models across actor boundaries. Don't assume `@Observable` moves work to MainActor. Swift 6 has stricter "sending risks data races" diagnostics — watch for isolation mismatches in closures capturing `self`. (Confidence: medium-high)
+5. **GRDB on iOS:** No iOS 17-specific issues. Latest is **7.10.0**. `DatabasePool` + WAL works. Migrations fine for our modest schema. One `DateFormatter` Sendability issue was fixed in 7.2+. (Confidence: high)
+6. **SPM structure:** 3-way split is defensible. **Recommendation:** Use **one local package with two library targets** (`BeeChatMobileKit` + `BeeChatUI`) rather than two separate packages. Preserves modularity without Xcode resolution complexity. (Confidence: medium-high)
 
 ### Q to Q (Builder) — ⏳ Pending:
 1. MessageMapper: direct mapping vs intermediate display model?
