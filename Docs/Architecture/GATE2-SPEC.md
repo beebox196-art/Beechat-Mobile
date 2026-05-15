@@ -1,17 +1,27 @@
 # Gate 2 Specification: Real Data Pipeline
 
 **Date:** 2026-05-15
-**Status:** DRAFT — Under team review (Kieran review received, fixes applied)
+**Status:** DRAFT — Final review complete, ready for Adam's approval
 **Author:** Bee (Coordinator)
 **Reviewers:** Q (Builder), Kieran (Reviewer), Mel (Designer), Gav (Researcher)
 
 ### Review Log
+
+#### Round 1 (Initial review)
 | Reviewer | Status | Key Findings |
 |----------|--------|-------------|
 | Kieran | ✅ Complete | 2 blockers (AnyCodable, error handling), 4 warnings (threading, temporal coupling, dependency graph, in-flight sends), 2 nits |
 | Mel | ✅ Complete | Adaptive NavigationSplitView, toolbar status indicator, offline banner, typing indicator before streaming, inline error states |
 | Gav | ✅ Complete | URLSessionWebSocketTask ✅, Exyte 3.1.0 breaking changes ⚠️, Keychain raw Security ✅, actor/MainActor bridge ✅, GRDB 7.10.0 ✅, one local package with two targets recommended |
 | Q | ⏳ Pending | — |
+
+#### Round 2 (Final stability-focused review)
+| Reviewer | Status | Key Findings |
+|----------|--------|-------------|
+| Kieran | ✅ Complete | 0 new blockers. Previous fixes verified. 1 warning: DatabaseManager.shared temporal coupling needs explicit documentation (already in spec). 1 nit: BeeChatMobileKit naming. |
+| Mel | ✅ Complete | Strip to minimum viable UX. No separate empty state view file. No theme system for Gate 2. Focus on: connection indicator, offline banner, streaming text. |
+| Gav | ✅ Complete | 2 blockers: (1) Package.swift pins Exyte at `from: 2.1.0` not exact `2.7.10`, contradicting spec. (2) Optimistic send code reinvents delivery state — v5's SyncBridge already owns idempotency and delivery ledger. 4 warnings: app dependency boundary, SPM executable target wrong for iOS, transitive deps documented, GRDB observation preferred over manual refresh. |
+| Q | ✅ Complete | 4 must-fixes: (1) App target must be Xcode project not SPM. (2) App needs direct BeeChatMobileKit dependency. (3) Swift tools version must be 6.0 not 5.9. (4) Drop clientMode from config. 4 should-fixes: merge delegate handler, merge small view files, KeychainTokenStore+iOS likely unneeded, streaming messages key by message ID not session ID. |
 
 ---
 
@@ -48,20 +58,21 @@ Every component must be a **standalone module with a clear public API**, not a m
 | **BeeChatUI** | NEW (local SPM package) | ExyteChat, BeeChatMobileKit | View layer — maps ViewModel state to Exyte ChatView |
 | **BeeChatMobile** (app target) | NEW | BeeChatMobileKit, BeeChatUI | App entry point, SwiftUI lifecycle, scene management |
 
-**Package.swift dependency graph:** *(Updated after Kieran review — removed duplicate dependency)*
+**Package.swift dependency graph:** *(Updated after Q + Gav final review — app needs direct Kit dependency as composition root)*
 ```
-BeeChatMobile (app)
+BeeChatMobile (app target, Xcode project NOT SPM)
 ├── BeeChatUI
 │   ├── ExyteChat
 │   └── BeeChatMobileKit
-│       ├── BeeChatSyncBridge
-│       │   ├── BeeChatGateway
-│       │   └── BeeChatPersistence
-│       │       └── GRDB
-│       └── (iOS-specific config, Keychain, etc.)
+├── BeeChatMobileKit ← direct dependency (app is composition root)
+│   ├── BeeChatSyncBridge
+│   │   ├── BeeChatGateway
+│   │   └── BeeChatPersistence
+│   │       └── GRDB
+│   └── (iOS-specific config, Keychain, etc.)
 ```
 
-> **Kieran's finding:** The original graph listed `BeeChatMobileKit` twice — once as a direct app dependency and once transitively through `BeeChatUI`. Removed the direct dependency; the app accesses BeeChatMobileKit through BeeChatUI.
+> **Q + Gav finding (Round 2):** The app MUST depend directly on `BeeChatMobileKit` because it's the composition root — it creates the ViewModel, Config, and opens the database. The Round 1 removal was incorrect. Also: the app target must be an Xcode project target (SPM cannot build iOS app bundles).
 
 ### 2.2 Don't Reinvent the Wheel
 
@@ -714,7 +725,7 @@ BeeChatMobile/Sources/BeeChatMobile/BeeChatDemoView.swift  # Replaced by BeeChat
 |-------------|-------|
 | iOS minimum | 17.0 |
 | Xcode | 26.x (current) |
-| Swift | 5.9+ (SPM tools-version) |
+| Swift | Swift 6.0 toolchain, Swift 5 language mode per target |
 | Simulator | iPhone 17 Pro, iOS 26.2 |
 
 ---
@@ -747,14 +758,57 @@ BeeChatMobile/Sources/BeeChatMobile/BeeChatDemoView.swift  # Replaced by BeeChat
 5. **GRDB on iOS:** No iOS 17-specific issues. Latest is **7.10.0**. `DatabasePool` + WAL works. Migrations fine for our modest schema. One `DateFormatter` Sendability issue was fixed in 7.2+. (Confidence: high)
 6. **SPM structure:** 3-way split is defensible. **Recommendation:** Use **one local package with two library targets** (`BeeChatMobileKit` + `BeeChatUI`) rather than two separate packages. Preserves modularity without Xcode resolution complexity. (Confidence: medium-high)
 
-### Q to Q (Builder) — ⏳ Pending:
-1. MessageMapper: direct mapping vs intermediate display model?
-2. @Observable + @MainActor streaming performance?
-3. Swift tools version: 5.9 vs 6.0?
+### Q (Builder) — ✅ Received:
+1. **MessageMapper:** Direct mapping. No intermediate display model for Gate 2. Map v5 `ChatMessage` → Exyte `Message` directly. Add display model later if needed.
+2. **Streaming performance:** Key streaming messages by **message ID** (not session ID) to match v5's `StreamingMessageTracker`. Coalesce UI updates, don't do per-token full array churn.
+3. **Swift tools version:** Must be **6.0** to match v5's Package.swift. Add `swiftLanguageVersion(.v5)` to each target. The current `5.9` will cause SPM resolution failures.
+4. **App target:** SPM cannot build iOS app targets. The app must be an Xcode project target, not an SPM target. Only `BeeChatMobileKit` and `BeeChatUI` should be SPM library targets.
+5. **App dependency:** The app needs **direct** dependency on `BeeChatMobileKit` (for config + ViewModel creation), not just through `BeeChatUI`. Kieran's Round 1 removal was incorrect — the app is the composition root.
+6. **KeychainTokenStore+iOS.swift:** Likely unneeded — v5's implementation already uses platform-neutral `kSecClassGenericPassword` + `kSecAttrAccessibleAfterFirstUnlock`. No `SecAccessControl` macOS-specific APIs.
+7. **File consolidation:** Merge `SyncBridgeDelegateHandler` into ViewModel extension (matches v5's `SyncBridgeObserver` pattern). Merge `ConnectionStatusView` + `OfflineBannerView` into `ConnectionViews.swift`. Merge `EmptyStateView` inline into `BeeChatView.swift`. Saves 3 files.
+8. **Drop clientMode:** `BeeChatMobileConfig.clientMode` is unnecessary — v5's `GatewayClient.Configuration` already derives platform from `#if os(iOS)`.
+
+## 10. Final Review Action Items
+
+The following changes MUST be made before Gate 2A implementation begins. Identified by all four reviewers across two review rounds.
+
+### Must Fix (before any code is written)
+
+| # | Item | Source | Action |
+|---|------|--------|--------|
+| F1 | Package.swift pins Exyte at `from: 2.1.0` — must be exact `2.7.10` | Gav R2 | Change to `.exact("2.7.10")` and commit Package.resolved |
+| F2 | App target must be Xcode project, not SPM executable | Q R2, Gav R2 | SPM contains library targets only. App target stays in Xcode project. |
+| F3 | App needs direct BeeChatMobileKit dependency | Q R2, Gav R2 | App is composition root — creates ViewModel, Config, opens DB. |
+| F4 | Swift tools version must be 6.0 | Q R2, Gav R2 | Mobile Package.swift must declare `swift-tools-version:6.0` to match v5. Add `swiftLanguageVersion(.v5)` per target. |
+| F5 | Drop `clientMode` from BeeChatMobileConfig | Q R2 | v5's `GatewayClient.Configuration` already derives platform from `#if os(iOS)`. |
+| F6 | Optimistic send code reinvents delivery state | Gav R2 | Don't add `status` to `Message`. v5's `SyncBridge.sendMessage` already owns idempotency and delivery ledger. |
+
+### Should Fix (for cleaner build)
+
+| # | Item | Source | Action |
+|---|------|--------|--------|
+| S1 | Merge SyncBridgeDelegateHandler into ViewModel extension | Q R2 | Follow v5's `SyncBridgeObserver` pattern. |
+| S2 | Merge ConnectionStatusView + OfflineBannerView into ConnectionViews.swift | Q R2, Mel R2 | Two related views, one file. |
+| S3 | Merge EmptyStateView inline into BeeChatView | Q R2, Mel R2 | Trivial component. No separate file for Gate 2. |
+| S4 | KeychainTokenStore+iOS.swift likely unneeded | Q R2 | v5's implementation is already platform-neutral. |
+| S5 | Stream messages keyed by message ID, not session ID | Q R2 | Match v5's `StreamingMessageTracker`. |
+| S6 | Use GRDB observation, not manual refresh | Gav R2 | `ValueObservation` for session/message lists. |
+| S7 | No theme system for Gate 2 | Mel R2 | Keep `BeeChatTheme.swift` as config constants only. |
+| S8 | Dependency table split direct vs transitive | Gav R2 | Direct: Exyte/Chat exact 2.7.10 + local v5. Transitive: Kingfisher, GiphyUISDK, MediaPicker, ActivityIndicatorView, GRDB. |
+
+### Nits (documented, no spec change needed)
+
+| # | Item | Source |
+|---|------|--------|
+| N1 | Exyte `User` uses `isCurrentUser` convenience init → `UserType` internally | Q R2 |
+| N2 | `DatabaseManager.shared` singleton fine for MVP — no protocol wrapper yet | Q R2 |
+| N3 | `BeeChatMobileKit` naming is fine for now | Kieran R2 |
+| N4 | No `[weak self]` in delegate Task closures — acceptable for app-lifecycle ViewModel | Kieran R1 |
+| N5 | Exyte issue #223 — fast insertions cause UI churn. Streaming coalescence already covers this. | Gav R2 |
 
 ---
 
-## 10. Success Metrics
+## 11. Success Metrics
 
 | Metric | Target |
 |--------|--------|
@@ -762,12 +816,8 @@ BeeChatMobile/Sources/BeeChatMobile/BeeChatDemoView.swift  # Replaced by BeeChat
 | Gate 2B completion | Live gateway messages appear in real-time |
 | Gate 2C completion | End-to-end send/receive works |
 | Gate 2D completion | Disconnect/reconnect works cleanly |
-| Total new Swift files | ~15 (excluding tests) |
+| Total new Swift files | ~11-12 (excluding tests, consolidated from original ~15) |
 | Total modified v5 files | 1 (AnyCodable.swift) |
 | Build time (cold) | < 60 seconds |
 | Build time (incremental) | < 15 seconds |
 | Memory on simulator | < 100MB baseline |
-
----
-
-*This spec is a DRAFT. All team members should review and comment before implementation begins.*
