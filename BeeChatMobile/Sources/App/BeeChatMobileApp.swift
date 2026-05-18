@@ -8,13 +8,16 @@ struct BeeChatMobileApp: App {
 
     var body: some Scene {
         WindowGroup {
-            SessionListView(viewModel: viewModel)
+            TopicListView(viewModel: viewModel)
                 .task {
-                    // B2 fix: Catch and propagate errors instead of try?
                     do {
+                        // Offline-first: load cached data
                         try await viewModel.start()
+                        // Then connect to live gateway
+                        await viewModel.connect()
                     } catch {
-                        viewModel.currentError = error
+                        viewModel.connectionError = error.localizedDescription
+                        viewModel.connectionState = .error
                     }
                 }
         }

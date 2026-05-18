@@ -7,6 +7,7 @@ public struct BeeChatView: View {
     @State public var viewModel: BeeChatMobileViewModel
     @State private var messages: [ExyteChat.Message] = []
     @State private var draft: String = ""
+    @State private var streamingMessageId: String = "streaming-msg"
 
     public init(viewModel: BeeChatMobileViewModel) {
         self.viewModel = viewModel
@@ -14,23 +15,29 @@ public struct BeeChatView: View {
 
     public var body: some View {
         VStack(spacing: 0) {
-            // B4: Wire connection status into view hierarchy
-            ConnectionStatusView(state: viewModel.connectionState)
+            // Wire connection status into view hierarchy with retry action
+            ConnectionStatusView(
+                state: viewModel.connectionState,
+                onRetry: {
+                    Task {
+                        await viewModel.reconnect()
+                    }
+                }
+            )
 
-            ChatView(messages: messages) { draft in
-                guard let sessionId = viewModel.selectedSessionId else { return }
+            ChatView(messages: mergedMessages) { draft in
+                guard let topicId = viewModel.selectedTopicId else { return }
                 Task {
                     do {
-                        try await viewModel.send(text: draft.text, to: sessionId)
-                        // W5: Surface errors instead of silent try?
+                        try await viewModel.send(text: draft.text, to: topicId)
                         loadMessages()
                     } catch {
-                        viewModel.currentError = error
+                        viewModel.connectionError = error.localizedDescription
                     }
                 }
             }
             .overlay {
-                // W4: Display streaming indicator when active
+                // Display streaming indicator when active
                 if viewModel.isStreaming {
                     VStack {
                         StreamingIndicatorView()
@@ -43,20 +50,59 @@ public struct BeeChatView: View {
         .onAppear {
             loadMessages()
         }
-        .onChange(of: viewModel.selectedSessionId) { _, _ in
+        .onChange(of: viewModel.selectedTopicId) { _, _ in
             loadMessages()
+        }
+        .onChange(of: viewModel.streamingContent) { _, _ in
+            updateStreamingMessage()
+        }
+        .onChange(of: viewModel.isStreaming) { _, newValue in
+            if !newValue {
+                // Streaming ended, refresh messages
+                loadMessages()
+            }
         }
     }
 
-    // B1 fix: Use Task (non-detached, inherits MainActor) instead of Task.detached
-    // S10 from spec: DB reads are synchronous and blocking, but Task on MainActor
-    // is acceptable for Gate 2A data sizes. Post-Gate-2: use ValueObservation.
+    /// Merge persisted messages with live streaming content
+    private var mergedMessages: [ExyteChat.Message] {
+        guard let topicId = viewModel.selectedTopicId,
+              viewModel.isStreaming,
+              let streamingText = viewModel.streamingContent[topicId],
+              !streamingText.isEmpty else {
+            return messages
+        }
+
+        var merged = messages
+        // Remove any existing streaming message
+        merged.removeAll { $0.id == streamingMessageId }
+
+        let streamingMsg = ExyteChat.Message(
+            id: streamingMessageId,
+            user: ExyteChat.User(
+                id: "bee",
+                name: "Bee",
+                avatarURL: nil,
+                isCurrentUser: false
+            ),
+            status: .sent,
+            createdAt: Date(),
+            text: streamingText
+        )
+        merged.append(streamingMsg)
+        return merged
+    }
+
+    private func updateStreamingMessage() {
+        // onChange handles the refresh automatically via mergedMessages
+    }
+
     private func loadMessages() {
-        guard let sessionId = viewModel.selectedSessionId else { messages = []; return }
+        guard let topicId = viewModel.selectedTopicId else { messages = []; return }
         Task {
-            let msgs = (try? viewModel.messages(for: sessionId)) ?? []
+            let msgs = (try? viewModel.messages(for: topicId)) ?? []
             let mapped = MessageMapper.exyteMessages(from: msgs)
-            if viewModel.selectedSessionId == sessionId {
+            if viewModel.selectedTopicId == topicId {
                 self.messages = mapped
             }
         }

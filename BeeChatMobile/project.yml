@@ -50,6 +50,8 @@ targets:
     dependencies:
       - target: BeeChatMobileKit
       - target: BeeChatUI
+      - package: Chat
+        product: GiphyUISDK
 
 packages:
   Chat:

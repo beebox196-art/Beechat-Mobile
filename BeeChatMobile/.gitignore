@@ -1,0 +1,17 @@
+# Xcode
+*.xcuserdata
+*.xcworkspace/xcuserdata
+DerivedData/
+build/
+
+# XcodeGen
+*.xcodeproj
+*.xcworkspace
+
+# Secrets
+gateway-config.json
+*.pem
+*.key
+
+# macOS
+.DS_Store
