@@ -1,6 +1,6 @@
 # Gate 2B.5 — Phase 1: Data Layer (v3.2)
 
-**Status:** Final — v3.2 (all blockers resolved, team-approved)  
+**Status:** Final — v3.2 (all blockers resolved, team-approved)
 **Parent:** GATE-2B5-TOPIC-ARCHITECTURE-v2.md  
 **Date:** 2026-05-18  
 **Replaces:** GATE-2B5-PHASE1-DATA-LAYER-v2.md  
@@ -42,6 +42,7 @@
 | **Q W21:** `bridge.rpcClient.sessionsSubscribe()` won't compile — `rpcClient` is `private` | Q v3.1 review | Redundant — `SyncBridge.start()` already subscribes. Remove from spec (§3.7.2) |
 | **Q W22:** TopicListView is 4 changed lines, not 6 | Q v3.1 review | Corrected in §3.8 |
 | **Q W23:** `messages(for sessionId:)` parameter name becomes misleading | Q v3.1 review | Add internal helper `sessionKey(for topicId:)` to clarify intent (§3.7.6) |
+| **Kieran D1:** Raw SQL uses `strftime('%s','now')` but bridge columns are `.datetime` (ISO8601) | Kieran v3.2 review | Changed to `datetime('now')` — matches existing Migration005 convention (§3.5) |
 
 ---
 
@@ -557,7 +558,7 @@ public func saveBridge(topicId: String, sessionKey: String) throws {
             INSERT INTO topic_session_bridge
                 (topicId, spaceId, openclawSessionKey, bridgeVersion, status, createdAt, updatedAt)
             VALUES
-                (?, 'default', ?, 1, 'active', strftime('%s','now'), strftime('%s','now'))
+                (?, 'default', ?, 1, 'active', datetime('now'), datetime('now'))
             ON CONFLICT(topicId) DO UPDATE SET
                 openclawSessionKey = excluded.openclawSessionKey,
                 updatedAt = excluded.updatedAt
