@@ -69,7 +69,7 @@
 
 **Recovery:** 2026-05-16 — Bee breached protocol (implemented instead of orchestrating), team audit confirmed salvageable. Recovery: `git restore` → Q rebuilt → Kieran validated. Commit: `8feebb4`.
 
-#### Gate 2B: Live Gateway Connection 🔄 IN PROGRESS
+#### Gate 2B: Live Gateway Connection ✅ FUNCTIONALLY COMPLETE
 **Goal:** Connect to real OpenClaw gateway, receive messages in real-time. Send not required.
 - [x] Fix default gateway port (:3000 → :18789)
 - [x] Fix localhost → 127.0.0.1 (iOS simulator IPv6)
@@ -82,13 +82,29 @@
 - [x] Device identity sent on handshake (deviceFamily: "mobile" added to ClientInfo)
 - [x] Gateway auto-pairing works for local connections (device approved, full scopes granted)
 - [x] App shows 🟢 Online status when connected
-- [ ] Incoming messages render in real-time (testing needed)
-- [ ] Streaming text (delta events) updates character-by-character (testing needed)
-- [ ] Session list updates on sessions.changed (testing needed)
-- [ ] Reconnect works after brief disconnect (testing needed)
 - [x] Cached data shows immediately on launch (offline-first)
 
-**Current state:** App builds, runs, connects to gateway with full operator scopes. Device pairing approved. 🟢 Online status shown. Ready for functional testing of real-time message delivery.
+**Remaining 2B testing (deferred to 2B.5 verification):**
+- [ ] Incoming messages render in real-time
+- [ ] Streaming text (delta events) updates character-by-character
+- [ ] Topic list updates on sessions.changed
+- [ ] Reconnect works after brief disconnect
+
+**Current state:** App connects to gateway with full operator scopes. 🟢 Online status confirmed. Remaining functional testing (real-time messages, streaming) deferred to Gate 2B.5 verification phase.
+
+#### Gate 2B.5: Topic Architecture 📋 SPEC DRAFTED — PENDING TEAM REVIEW
+**Goal:** Replace raw session list with proper Topic layer (same as macOS BeeChat). Sidebar shows user-created Topics, not gateway sessions.
+**Spec:** [GATE-2B5-TOPIC-ARCHITECTURE.md](Docs/Architecture/GATE-2B5-TOPIC-ARCHITECTURE.md)
+- [ ] Team review (Kieran adversarial, Mel UX, Gav research, Q builder)
+- [ ] Adam approval
+- [ ] ViewModel: `[Session]` → `[Topic]` with TopicRepository
+- [ ] Session filtering via BeeChatSessionFilter
+- [ ] New Topic creation flow (name entry, gateway session bridge)
+- [ ] Empty state UI ("No conversations yet" + CTA)
+- [ ] TopicListView: "+" button and NewTopicSheet
+- [ ] Message send uses topic-resolved session keys
+- [ ] BeeChat macOS regression test
+- [ ] Kieran sign-off
 
 #### Gate 2C: End-to-End Send/Receive
 **Goal:** User sends message → gateway processes → reply streams back.
@@ -150,7 +166,20 @@ See [ADR-002](Docs/Decisions/ADR-002-team-driven-development.md) for full detail
 **Bee orchestrates only — never implements code.**
 
 ## Active Blockers
-- None currently
+- **Gate 2C blocked by Gate 2B.5** — send/receive needs topic-resolved session keys, not raw session IDs. Implementing 2C before 2B.5 would embed the wrong architecture.
+
+## Gate 2B.5 Spec
+- **Spec:** [GATE-2B5-TOPIC-ARCHITECTURE.md](Docs/Architecture/GATE-2B5-TOPIC-ARCHITECTURE.md)
+- **Status:** Draft — pending team review (Kieran, Mel, Gav, Q) then Adam approval
+- **Why:** The sidebar currently shows raw gateway sessions (cron jobs, agent sessions, sub-agents). This is the same problem macOS BeeChat had and solved with the Topic layer. The shared v5 packages (Topic, TopicRepository, TopicSessionBridge, BeeChatSessionFilter) already exist — iOS just needs to USE them.
+- **Key decisions for review:**
+  - D1: Use same Topic model as macOS (no iOS-specific divergence)
+  - D2: Sidebar shows only user-created topics (no auto-discovery of sessions)
+  - D3: First message in new topic creates gateway session + bridge entry
+  - D4: Store all sessions locally, filter on display
+  - D5: Seed data uses Topic model
+  - D6: New Topic flow: toolbar "+" → name entry sheet → auto-select → chat
+  - D7: First launch shows empty state with "Start a conversation" button
 
 ## Tracked Follow-ups (from Kieran's Gate 2A review, non-blocking)
 - MessageMapper in BeeChatUI not MobileKit (Exyte dep reason — spec drift, harmless)
