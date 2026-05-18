@@ -1,6 +1,6 @@
 # BeeChat Mobile Status
 
-**Phase:** Gate 2 — Real Data Pipeline (Gate 2A ✅, Gate 2B 🔄 IN PROGRESS — WebSocket connects, scope issue pending)
+**Phase:** Gate 2 — Real Data Pipeline (Gate 2A ✅, Gate 2B 🔄 IN PROGRESS — device paired, connected to gateway)
 **Last Updated:** 2026-05-18
 
 ## Research-First Gate
@@ -79,14 +79,16 @@
 - [x] ConnectionStatusView tappable with retry (Kieran #3)
 - [x] Sessions → Topics rename throughout UI
 - [x] GatewayConfigLoader reads from env vars or file (iOS sandbox safe)
-- [ ] **BLOCKER: sessions.subscribe rejected with "missing scope: operator.read"** — gateway auth needs mobile client scope config
-- [ ] Incoming messages render in real-time (blocked by scope issue)
-- [ ] Streaming text (delta events) updates character-by-character (blocked by scope issue)
-- [ ] Session list updates on sessions.changed (blocked by scope issue)
-- [ ] Reconnect works after brief disconnect
-- [ ] Cached data shows immediately on launch (offline-first) ✅ (works without gateway)
+- [x] Device identity sent on handshake (deviceFamily: "mobile" added to ClientInfo)
+- [x] Gateway auto-pairing works for local connections (device approved, full scopes granted)
+- [x] App shows 🟢 Online status when connected
+- [ ] Incoming messages render in real-time (testing needed)
+- [ ] Streaming text (delta events) updates character-by-character (testing needed)
+- [ ] Session list updates on sessions.changed (testing needed)
+- [ ] Reconnect works after brief disconnect (testing needed)
+- [x] Cached data shows immediately on launch (offline-first)
 
-**Current state:** App builds, runs, connects to gateway. WebSocket handshake succeeds. But `sessions.subscribe` RPC is rejected because the mobile client doesn't have the `operator.read` scope. This is a gateway-side auth configuration issue, not a client bug.
+**Current state:** App builds, runs, connects to gateway with full operator scopes. Device pairing approved. 🟢 Online status shown. Ready for functional testing of real-time message delivery.
 
 #### Gate 2C: End-to-End Send/Receive
 **Goal:** User sends message → gateway processes → reply streams back.
@@ -148,7 +150,7 @@ See [ADR-002](Docs/Decisions/ADR-002-team-driven-development.md) for full detail
 **Bee orchestrates only — never implements code.**
 
 ## Active Blockers
-- **Ollama credits exhausted** — refills tomorrow (Sunday 2026-05-17). No sub-agent work until then.
+- None currently
 
 ## Tracked Follow-ups (from Kieran's Gate 2A review, non-blocking)
 - MessageMapper in BeeChatUI not MobileKit (Exyte dep reason — spec drift, harmless)
@@ -158,20 +160,24 @@ See [ADR-002](Docs/Decisions/ADR-002-team-driven-development.md) for full detail
 - DB name: `beechat.db` not `beechat.sqlite`
 - No test files in `BeeChatMobileKitTests/` yet
 - No DB init-order assertion (spec S9)
-- Default gateway port `:3000` not `:18789` (needs fixing before Gate 2B)
+- Default gateway port `:3000` → now `:18789` (fixed in Gate 2B)
 - `@State` on ViewModel reference type unnecessary — `let` would suffice
 
 ## Git
 - **Remote:** https://github.com/beebox196-art/Beechat-Mobile
 - **Branch:** main
-- **Commit:** 8feebb4 — fix(project.yml): restore proper 3-target module structure (Q's recovery build)
-- **Previous:** e17fc43 — status: Gate 2A validated on simulator, pending Adam approval
-- **Audit files written but uncommitted:** AUDIT-gate2a-prior-art.md, AUDIT-gate2a-state.md
+- **BeeChat-Mobile commit:** 9fa641e — fix(gateway): add deviceFamily to ClientInfo for iOS
+- **BeeChat-v5 commit:** 73a5de1 — docs: add Gate 2B rollback plan
+- **Previous:** 8feebb4 — fix(project.yml): restore proper 3-target module structure (Q's recovery build)
 
-## Next Steps (when resumed)
-1. Adam approves Gate 2A → kick off Gate 2B with Q (live gateway connection)
-2. Q fixes gateway port `:3000` → `:18789` as part of Gate 2B setup
-3. Gate 2B: WebSocket connect → connection state UI → incoming messages → streaming
+## Next Steps
+1. Test real-time message delivery (send a message from another client, verify it appears in iOS app)
+2. Test streaming text (agent reply should stream character-by-character)
+3. Test sessions.changed (new sessions appear in topic list)
+4. Test reconnect (kill gateway briefly, verify app reconnects)
+5. Remove debug logging from v5 GatewayClient (file log to Desktop)
+6. Kieran review of Gate 2B changes
+7. Gate 2B sign-off → move to Gate 2C (send/receive)
 
 ## Context Notes
 - **Parent project:** BeeChat v5 (macOS) — shares Core Swift packages via SPM local dependency
