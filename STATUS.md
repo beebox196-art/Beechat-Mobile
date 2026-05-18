@@ -92,35 +92,50 @@
 
 **Current state:** App connects to gateway with full operator scopes. 🟢 Online status confirmed. Remaining functional testing (real-time messages, streaming) deferred to Gate 2B.5 verification phase.
 
-#### Gate 2B.5: Topic Architecture 🟡 SPEC v2 READY — AWAITING ADAM APPROVAL
+#### Gate 2B.5: Topic Architecture 🟡 PHASE 1 v3 SPEC — TEAM REVIEW IN PROGRESS
 **Goal:** Replace raw session list with proper Topic layer (same as macOS BeeChat). Sidebar shows user-created Topics, not gateway sessions.
-**Spec v1:** [GATE-2B5-TOPIC-ARCHITECTURE.md](Docs/Architecture/GATE-2B5-TOPIC-ARCHITECTURE.md)
-**Spec v2 (revised):** [GATE-2B5-TOPIC-ARCHITECTURE-v2.md](Docs/Architecture/GATE-2B5-TOPIC-ARCHITECTURE-v2.md)
-**Consolidated review:** [GATE-2B5-CONSOLIDATED-REVIEW.md](Docs/Architecture/GATE-2B5-CONSOLIDATED-REVIEW.md)
-**Reviewer reports:** [Q](Docs/Architecture/GATE-2B5-Q-REVIEW.md), [Kieran pass 2](Docs/Architecture/GATE-2B5-KIERAN-REVIEW-PASS2.md), [Mel pass 2](Docs/Architecture/GATE-2B5-MEL-REVIEW-PASS2.md)
 
-**All 8 blockers resolved in v2 spec:**
-- [x] B1: All sessionKey:nil references removed — upfront key is only pattern
-- [x] B2: BeeChatSessionFilter overload added — isBeeChatSession(_:topicRepo:)
-- [x] B3: Computed message counts via SQL JOIN — no triggers
-- [x] B4: Atomic migration with GRDB transaction + version tracking
-- [x] B5: pendingGatewaySync flag + reconciliation on connect
-- [x] B6: UNIQUE constraint on openclawSessionKey + upsert
-- [x] B7: sessionsSubscribe() added to reconnect path
-- [x] B8: Seed data creates Topic, not Session
+**Phased approach:** Gate 2B.5 is split into 4 phases, each independently testable with review gates.
 
-**v2 also includes:**
-- Mel M6-M14 UX specs (sheet, popover, swipe, empty states, offline, VoiceOver, Dynamic Type)
-- Q H1-H4 hidden gotchas (sendMessage topic param, saveBridge upsert, TopicRow refactor, ValueObservation)
-- Two-model architecture documentation (Session = backend, Topic = frontend)
-- 13-step ViewModel implementation plan, 9-step UI plan, 20-item validation checklist
+**Phase 1: Data Layer (current)** — Topic model, repository, migration, seed data, ViewModel wiring. No UI changes except 3-line type fix.
 
-**Next:**
-- [ ] Adam approval of v2 spec
-- [ ] Q implementation
-- [ ] Kieran review of Gate 2B.5 code
-- [ ] Bee validation on simulator
-- [ ] Adam sign-off
+**Phase 1 spec history:**
+- v1: [GATE-2B5-PHASE1-DATA-LAYER.md](Docs/Architecture/GATE-2B5-PHASE1-DATA-LAYER.md) — BLOCKED by 10 blockers
+- v2: [GATE-2B5-PHASE1-DATA-LAYER-v2.md](Docs/Architecture/GATE-2B5-PHASE1-DATA-LAYER-v2.md) — BLOCKED by 5 blockers (Q B1-B3, Kieran B3b-B3c)
+- **v3 (current):** [GATE-2B5-PHASE1-DATA-LAYER-v3.md](Docs/Architecture/GATE-2B5-PHASE1-DATA-LAYER-v3.md) — All blockers resolved
+
+**Architecture spec (parent):**
+- v1: [GATE-2B5-TOPIC-ARCHITECTURE.md](Docs/Architecture/GATE-2B5-TOPIC-ARCHITECTURE.md)
+- v2: [GATE-2B5-TOPIC-ARCHITECTURE-v2.md](Docs/Architecture/GATE-2B5-TOPIC-ARCHITECTURE-v2.md)
+- Consolidated review: [GATE-2B5-CONSOLIDATED-REVIEW.md](Docs/Architecture/GATE-2B5-CONSOLIDATED-REVIEW.md)
+- Reviewer reports: [Q](Docs/Architecture/GATE-2B5-Q-REVIEW.md), [Kieran pass 2](Docs/Architecture/GATE-2B5-KIERAN-REVIEW-PASS2.md), [Mel pass 2](Docs/Architecture/GATE-2B5-MEL-REVIEW-PASS2.md)
+
+**Phase 1 v3 resolves all blockers:**
+- [x] Q B1: Expose `topicRepo` as `public` on `BeeChatPersistenceStore`
+- [x] Q B2: Remove broken `upsertBridge()`, fix `saveBridge()` to use `upsertPreservingCreatedAt()`
+- [x] Q B3a: Allow minimal 3-line change in `TopicListView` (Session→Topic)
+- [x] Kieran B3b: Computed column alias renamed to `messageCount` for GRDB decoding
+- [x] Kieran B3c: `pendingGatewaySync` parameter added to `create(name:pendingGatewaySync:)`
+- [x] Kieran B5: Offline reconciliation via `pendingGatewaySync` + `fetchPendingSyncTopics()`
+- [x] Kieran B6: Migration012 is idempotent (checks columns exist before adding)
+- [x] Kieran B7: UNIQUE index on `openclawSessionKey` in Migration012
+- [x] Kieran B8: `sessionsSubscribe()` in reconnect path
+- [x] Kieran B8 variant: Seed data creates Topics, not Sessions
+
+**Also resolved in v3:**
+- Q W3: `syncMetadataFromSessions()` method added for gateway→topic metadata sync
+- Q W5: `send()` passes `topic` parameter for context injection
+- Q W12: `send()` resolves topic ID → session key
+- Q H1: `saveBridge()` uses `upsertPreservingCreatedAt()` instead of `save()`
+- Kieran W9-W15: Documented as conventions, known limitations, or deferred
+- Mel M6-M14: Noted for Phase 3 (UI)
+
+**Phase 1 status:** 🔄 v3 spec written — routing to Q, Kieran, Mel for final review
+
+**Upcoming phases:**
+- Phase 2: ViewModel + Wiring (create topic, offline creation, reconnect)
+- Phase 3: UI Overhaul (topic list, new topic sheet, swipe actions, empty states)
+- Phase 4: Integration Test (20-item validation checklist)
 
 #### Gate 2C: End-to-End Send/Receive
 **Goal:** User sends message → gateway processes → reply streams back.
@@ -182,27 +197,23 @@ See [ADR-002](Docs/Decisions/ADR-002-team-driven-development.md) for full detail
 **Bee orchestrates only — never implements code.**
 
 ## Active Blockers
-- **Gate 2B.5 spec has 8 blockers** — must resolve before Q starts implementation. See consolidated review.
 - **Gate 2C blocked by Gate 2B.5** — send/receive needs topic-resolved session keys, not raw session IDs.
 
-## Gate 2B.5 Spec
-- **Spec v1:** [GATE-2B5-TOPIC-ARCHITECTURE.md](Docs/Architecture/GATE-2B5-TOPIC-ARCHITECTURE.md)
-- **Spec v2 (current):** [GATE-2B5-TOPIC-ARCHITECTURE-v2.md](Docs/Architecture/GATE-2B5-TOPIC-ARCHITECTURE-v2.md)
-- **Consolidated review:** [GATE-2B5-CONSOLIDATED-REVIEW.md](Docs/Architecture/GATE-2B5-CONSOLIDATED-REVIEW.md)
-- **Reviewer reports:** [Q](Docs/Architecture/GATE-2B5-Q-REVIEW.md), [Kieran pass 2](Docs/Architecture/GATE-2B5-KIERAN-REVIEW-PASS2.md), [Mel pass 2](Docs/Architecture/GATE-2B5-MEL-REVIEW-PASS2.md)
-- **Status:** 🟡 v2 spec ready — all 8 blockers resolved, awaiting Adam approval
-- **Verdict:** Architecture is sound. All blockers and UX requirements resolved in v2.
-- **Key decisions:**
-  - D1: Use same Topic model as macOS (no divergence)
-  - D2: Sidebar shows only user-created topics
+## Gate 2B.5 Phase 1 v3 Spec
+- **Current:** [GATE-2B5-PHASE1-DATA-LAYER-v3.md](Docs/Architecture/GATE-2B5-PHASE1-DATA-LAYER-v3.md)
+- **Status:** 🔄 Team review in progress (Q, Kieran, Mel)
+- **Architecture parent:** [GATE-2B5-TOPIC-ARCHITECTURE-v2.md](Docs/Architecture/GATE-2B5-TOPIC-ARCHITECTURE-v2.md)
+- **Key decisions (carried forward):**
+  - D1: Extend existing BeeChat-v5 codebase (no parallel structures)
+  - D2: Sidebar shows only user-created topics (filtered by bridge table)
   - D3: Topics created with gateway-format sessionKey upfront — NO nil session keys
-  - D4: Store all sessions locally, filter on display
-  - D5: Seed data uses Topic model
+  - D4: Two-model architecture: Session (backend) vs Topic (frontend)
+  - D5: Seed data creates Topics, not Sessions
   - D6: Chronological ordering (lastActivityAt DESC), not alphabetical
-  - D7: New Topic: compact sheet (iPhone) / popover (iPad), 80-char limit, auto-navigate
-  - D8: Offline creation: pendingGatewaySync flag + reconciliation on connect
-  - D9: Two-model architecture: Session (backend) vs Topic (frontend)
-  - D10: Computed message counts via SQL, no DB triggers
+  - D7: Offline creation: pendingGatewaySync flag + reconciliation on connect
+  - D8: Computed message counts via SQL JOIN, no DB triggers
+  - D9: expose topicRepo as public on BeeChatPersistenceStore
+  - D10: saveBridge() uses upsertPreservingCreatedAt()
 
 ## Tracked Follow-ups (from Kieran's Gate 2A review, non-blocking)
 - MessageMapper in BeeChatUI not MobileKit (Exyte dep reason — spec drift, harmless)
@@ -223,12 +234,14 @@ See [ADR-002](Docs/Decisions/ADR-002-team-driven-development.md) for full detail
 - **Previous:** 8feebb4 — fix(project.yml): restore proper 3-target module structure (Q's recovery build)
 
 ## Next Steps
-1. Adam approval of v2 spec (all 8 blockers resolved)
-2. Remove debug logging from v5 GatewayClient
-3. Gate 2B.5 implementation (Q) — 13 ViewModel steps + 9 UI steps
-4. Kieran review of Gate 2B.5 code
-5. Bee validation on simulator (20-item checklist)
-6. Gate 2B.5 sign-off → move to Gate 2C
+1. Team review of Phase 1 v3 spec (Q, Kieran, Mel)
+2. Resolve any remaining findings from v3 review
+3. Adam approval of Phase 1 v3 spec
+4. Q implements Phase 1 (Data Layer) — 11 steps
+5. Kieran review of Phase 1 code
+6. Bee validation on simulator
+7. Adam sign-off on Phase 1 → proceed to Phase 2 spec
+8. Repeat for Phase 2 (ViewModel + Wiring), Phase 3 (UI), Phase 4 (Integration)
 
 ## Context Notes
 - **Parent project:** BeeChat v5 (macOS) — shares Core Swift packages via SPM local dependency

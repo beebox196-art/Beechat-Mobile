@@ -1,10 +1,11 @@
-# Gate 2B.5 — Phase 1: Data Layer (v3)
+# Gate 2B.5 — Phase 1: Data Layer (v3.1)
 
-**Status:** Draft — awaiting final team review  
+**Status:** Draft — v3.1 awaiting final team review  
 **Parent:** GATE-2B5-TOPIC-ARCHITECTURE-v2.md  
 **Date:** 2026-05-18  
 **Replaces:** GATE-2B5-PHASE1-DATA-LAYER-v2.md  
-**Changes from v2:** All 5 blockers (B1–B3c from v2 review) resolved. All findings from Q's v2 review, Kieran's v2 review, and Mel's v2 review incorporated.
+**Changes from v2:** All 5 blockers (B1–B3c from v2 review) resolved. All findings from Q's v2 review, Kieran's v2 review, and Mel's v2 review incorporated.  
+**Changes from v3→v3.1:** B10 resolved (upsert claim corrected), W16/W19/W20 addressed.
 
 ---
 
@@ -31,6 +32,10 @@
 | **Q W3:** `fetchSessions()` returns `[Session]` — sync metadata to topics | Q v2 | Add `syncMetadataFromSessions()` method (§3.4) |
 | **Q W5:** `sendMessage` needs `topic` parameter for context injection | Q v2 | Add `topic` parameter to `send()` call (§3.8) |
 | **Q H1:** `saveBridge()` uses `save()` not `upsert` — crashes on duplicate | Q v2 | Change to `upsertPreservingCreatedAt()` (§3.5) |
+| **Kieran B10:** `upsertPreservingCreatedAt()` won't handle UNIQUE conflicts on `openclawSessionKey` | Kieran v3 review | Remove incorrect upsert claim; add do/catch around `saveBridge()` in `connect()` path (§3.5, §3.7) |
+| **Kieran W16:** `try?` around bootstrap `sendMessage` swallows errors; `markSynced` called regardless | Kieran v3 review | Move `markSynced` inside success path, use `do/catch` (§3.7.2) |
+| **Kieran W19:** `syncMetadataFromSessions()` processes all sessions, not just BeeChat ones | Kieran v3 review | Pass `beeChatSessions` instead of `sessions` (§3.7.2) |
+| **Kieran W20:** `upsertPreservingCreatedAt()` uses `onConflict: ["id"]` but bridge PK is `topicId` | Kieran v3 review | Document as known limitation; defensive do/catch at call sites (§3.5) |
 
 ---
 
@@ -57,7 +62,7 @@ The iOS app already links against `BeeChatPersistence`, which includes the compl
 
 ### 1.3 Goal for Phase 1
 
-Switch the iOS ViewModel from `Session` to `Topic` as the primary data model, using the **existing** BeeChat-v5 persistence layer with minimal additions. No UI changes beyond the 3-line type fix in `TopicListView`. The sidebar will show user-created Topics instead of raw gateway Sessions.
+Switch the iOS ViewModel from `Session` to `Topic` as the primary data model, using the **existing** BeeChat-v5 persistence layer with minimal additions. No UI changes beyond the ~6-line type fix in `TopicListView`. The sidebar will show user-created Topics instead of raw gateway Sessions.
 
 ---
 
@@ -442,6 +447,11 @@ public func fetchPendingSyncTopics() throws -> [Topic] {
 /// Session = gateway truth (server-side data).
 /// Topic = user-facing truth (local data + metadata from server).
 /// This method merges server-side metadata into local topics.
+///
+/// IMPORTANT: Pass only BeeChat sessions (filtered via BeeChatSessionFilter),
+/// not all gateway sessions. Non-BeeChat sessions (cron, system, etc.) won't have
+/// bridge entries and would be skipped, but filtering at the call site avoids
+/// unnecessary DB lookups (W19).
 public func syncMetadataFromSessions(_ sessions: [Session]) throws {
     try dbManager.write { db in
         for session in sessions {
@@ -543,9 +553,9 @@ public func saveBridge(topicId: String, sessionKey: String) throws {
 }
 ```
 
-**Rationale:** Q H1 — `save()` is insert-only and will crash with a unique constraint violation if called twice for the same topic (e.g., reconnect + sync). `upsertPreservingCreatedAt()` is safe. The `TopicSessionBridge` struct already conforms to `UpsertableRecord`.
+**Rationale:** Q H1 — `save()` is insert-only and will crash with a unique constraint violation if called twice for the same topic (e.g., reconnect + sync). `upsertPreservingCreatedAt()` is safe for duplicate `topicId` entries. The `TopicSessionBridge` struct already conforms to `UpsertableRecord`.
 
-**Note:** Once Migration012 adds the UNIQUE index on `openclawSessionKey`, `upsertPreservingCreatedAt()` will also handle the case where two different topics try to bridge to the same session key (the upsert will update the existing entry rather than crash).
+**⚠️ Known limitation (Kieran B10/W20):** `upsertPreservingCreatedAt()` uses `onConflict: ["id"]` internally, but `TopicSessionBridge`'s primary key is `topicId`, not `id`. GRDB maps this correctly for the PK-based upsert. However, it does **not** handle UNIQUE constraint conflicts on `openclawSessionKey`. If a second topic tries to bridge to a session key that already has a bridge entry, the UNIQUE index on `openclawSessionKey` (added by Migration012) will cause an `SQLITE_CONSTRAINT_UNIQUE` error. This is **correct defensive behaviour** — two topics should never share a session key. The application logic in `connect()` (step 4) checks `resolveTopicId()` before creating, which prevents this at the app layer. If it still occurs (e.g., race condition), the `do/catch` in the `connect()` path (§3.7.2) handles it gracefully.
 
 ### 3.6 Migration012 — Add `pendingGatewaySync` + UNIQUE Index
 
@@ -630,11 +640,15 @@ public func connect() async {
         // 1. Reconcile pending topics (offline creation)
         let pendingTopics = try persistenceStore.topicRepo.fetchPendingSyncTopics()
         for topic in pendingTopics {
-            // Send bootstrap message to create the gateway session
-            if let sessionKey = topic.sessionKey {
-                _ = try? await bridge.sendMessage(sessionKey: sessionKey, text: "Start", topic: topic)
+            guard let sessionKey = topic.sessionKey else { continue }
+            do {
+                _ = try await bridge.sendMessage(sessionKey: sessionKey, text: "Start", topic: topic)
+                // Only mark synced after confirmed success (W16)
+                try persistenceStore.topicRepo.markSynced(topicId: topic.id)
+            } catch {
+                print("[ViewModel] Failed to reconcile topic \(topic.id): \(error)")
+                // Leave pendingGatewaySync = true for next reconnect attempt
             }
-            try persistenceStore.topicRepo.markSynced(topicId: topic.id)
         }
         
         // 2. Fetch sessions from gateway
@@ -658,12 +672,18 @@ public func connect() async {
                     sessionKey: gatewaySession.id
                 )
                 try persistenceStore.topicRepo.save(topic)
-                try persistenceStore.topicRepo.saveBridge(topicId: topic.id, sessionKey: gatewaySession.id)
+                do {
+                    try persistenceStore.topicRepo.saveBridge(topicId: topic.id, sessionKey: gatewaySession.id)
+                } catch {
+                    // UNIQUE constraint on openclawSessionKey — another topic already bridges
+                    // to this session key (shouldn't happen but defensive). Skip bridge creation.
+                    print("[ViewModel] Bridge already exists for session \(gatewaySession.id): \(error)")
+                }
             }
         }
         
-        // 5. Sync metadata from gateway sessions to local topics
-        try persistenceStore.topicRepo.syncMetadataFromSessions(sessions)
+        // 5. Sync metadata from BeeChat sessions to local topics (W19 — only BeeChat sessions)
+        try persistenceStore.topicRepo.syncMetadataFromSessions(beeChatSessions)
         
         // 6. Refresh topic list
         self.topics = try persistenceStore.topicRepo.fetchAllActiveWithCounts()
@@ -748,7 +768,7 @@ No additional changes needed for reconnect.
 
 **File:** `BeeChat-Mobile/BeeChatMobile/Sources/BeeChatUI/TopicListView.swift`
 
-This is the only UI change in Phase 1. It's a 3-line type + property name update:
+This is the only UI change in Phase 1. It's a ~6-line type + property name update (Q v3 correction — was estimated at 3 lines):
 
 ```swift
 // BEFORE:
@@ -890,9 +910,14 @@ These are documented here to prevent future confusion:
 6. Register `Migration012` in `DatabaseManager.migrate()`
 7. Rewrite `seedTestData()` to create Topics
 8. Update ViewModel: `topics: [Topic]`, topic-based `start()`, `connect()`, `send()`, `refreshTopics()`
-9. Update `TopicListView`: 3-line type/property fix (`Session` → `Topic`)
+9. Update `TopicListView`: ~6-line type/property fix (`Session` → `Topic`, 4 property name changes + navigation title + type declaration — Q v3 correction)
 
-### Out of Scope (Future Phases)
+### Known Limitations (Deferred)
+
+- **W17:** `connect()` should guard against double-invocation (add `guard connectionState != .connected else { return }`) — defer to Phase 2
+- **W18:** No retry limit for stuck `pendingGatewaySync` topics — defer to Phase 2
+- **W20:** `upsertPreservingCreatedAt()` may need custom upsert if UNIQUE on `openclawSessionKey` causes edge-case failures — Q must verify at runtime
+- **Q note:** `BeeChatView` not audited in Phase 1 scope — may also reference `Session` properties, needs checking during implementation
 
 - New Topic creation UI (Phase 2)
 - Swipe actions, archive, delete UI (Phase 3)

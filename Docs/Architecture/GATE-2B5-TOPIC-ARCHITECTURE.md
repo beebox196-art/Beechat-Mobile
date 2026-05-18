@@ -1,10 +1,33 @@
 # Gate 2B.5: Topic Architecture Specification
 
 **Date:** 2026-05-18
-**Status:** DRAFT — Pending team review
+**Status:** REVISED — Team review complete, incorporating Kieran (adversarial) and Mel (UX) feedback
 **Author:** Bee (Coordinator)
-**Reviewers:** Kieran (Adversarial), Mel (UX), Gav (Research), Q (Builder)
+**Reviewers:** Kieran (Adversarial) ✅, Mel (UX) ✅, Gav (Research) — pending, Q (Builder) — pending
 **Blocks:** Gate 2C (send/receive) cannot proceed without this
+
+### Review Log
+
+#### Kieran (Adversarial) — ✅ Complete
+- **B1:** `BeeChatSessionFilter.isBeeChatSession()` creates new `TopicRepository()` per call — will deadlock on iOS @MainActor. **Fix:** Inject ViewModel's existing repo instance.
+- **B2:** `sessionKey: nil` pattern is fragile — macOS generates gateway-format key upfront. **Fix:** Create topics with `sessionKey = "agent:main:\(topicId.lowercased())"` immediately.
+- **B3:** Bare UUID fallback in send flow has no `agent:main:` prefix. **Fix:** Eliminated by B2 fix — no nil session keys.
+- **B4:** First launch after 2B→2B.5 upgrade loses all existing seed data from UI. **Fix:** Migration step to convert Session entries to Topic entries.
+- **W1:** 500ms polling loop is wasteful — replace with GRDB `ValueObservation`.
+- **W2:** Topic ordering should be explicit decision: last-activity descending for mobile.
+- **W3:** Bridge table cleanup strategy needed for stale entries.
+- **W5:** `MessageMapper` needs updating for Topic model.
+- **W8:** Seed data should be in one transaction.
+
+#### Mel (UX) — ✅ Complete
+- **Must-have:** Compact sheet for iPhone new topic creation, popover on iPad.
+- **Must-have:** No fake "Start" bootstrap message — generate key upfront (Kieran B2).
+- **Must-have:** Distinguish fresh install from "existing sessions hidden" — add secondary import path.
+- **Must-have:** Swipe actions for archive (default) + delete (destructive, confirmation, cascade warning).
+- **Must-have:** Error states — disconnected topic visible with disabled composer, bridge failure preserves draft.
+- **Must-have:** Raw session keys never in normal UI, only in debug/diagnostics.
+- **Correction:** macOS uses `lastActivityAt DESC` (chronological), not alphabetical. iOS should follow.
+- **Should-have:** Rename from context menu, suggest name after first message.
 
 ---
 
@@ -147,7 +170,7 @@ self.topics = try topicRepo.fetchAllActive()
 // 4. Update topic list from local DB (not from gateway)
 ```
 
-#### 3.2.2 ViewModel: Add TopicRepository
+#### 3.2.2 ViewModel: Add TopicRepository (injected, not per-call)
 
 **Current:**
 ```swift
@@ -157,31 +180,33 @@ public let persistenceStore: BeeChatPersistenceStore
 **Required:**
 ```swift
 public let persistenceStore: BeeChatPersistenceStore
-public let topicRepo: TopicRepository  // NEW
+public let topicRepo: TopicRepository  // NEW — injected, shared instance
 ```
 
-The `TopicRepository` is already in `BeeChatPersistence` — it just needs to be instantiated with the same `DatabaseManager`.
+The `TopicRepository` is already in `BeeChatPersistence` — it just needs to be instantiated with the same `DatabaseManager`. **Critical (Kieran B1):** Do NOT create fresh `TopicRepository()` instances per filter call. The ViewModel's `topicRepo` instance must be injected into `BeeChatSessionFilter` calls, replacing the static-method-with-fresh-repo pattern.
 
-#### 3.2.3 ViewModel: New Topic Creation
+#### 3.2.3 ViewModel: New Topic Creation (gateway key upfront)
 
 **Required new method:**
 ```swift
-/// Create a new topic. Session key is nil until first message is sent.
+/// Create a new topic. Gateway-format session key is generated immediately.
+/// Follows macOS pattern: sessionKey = "agent:main:\(topicId.lowercased())"
 public func createTopic(name: String) throws -> Topic {
-    let topic = Topic(name: name)
+    let topicId = UUID().uuidString
+    let gatewayKey = "agent:main:\(topicId.lowercased())"
+    let topic = Topic(id: topicId, name: name, sessionKey: gatewayKey)
     try topicRepo.save(topic)
+    try topicRepo.saveBridge(topicId: topicId, sessionKey: gatewayKey)
     self.topics = try topicRepo.fetchAllActive()
     return topic
 }
 ```
 
-**When first message is sent to a new topic:**
-1. Call `SyncBridge.sendMessage(sessionKey: topic.id, text: text)` — use the topic ID as the initial session key
-2. On gateway response, the session key may change to `agent:main:<uuid>`
-3. Update: `topicRepo.updateSessionKey(topicId: topic.id, sessionKey: gatewayKey)`
-4. Create bridge: `topicRepo.saveBridge(topicId: topic.id, sessionKey: gatewayKey)`
+**Kieran B2/B3 fix:** The original spec proposed `sessionKey: nil` and resolving on first message send. This is fragile — the gateway expects `agent:main:<id>` format, and a nil session key means messages can't be routed. The macOS app generates the gateway-format key upfront (`agent:main:\(topicId.lowercased())`) and never has a nil session key. iOS must follow the same pattern.
 
-#### 3.2.4 ViewModel: Session Filtering on Connect
+**No resolve-on-response needed:** Because the session key is generated upfront in gateway format, the bridge entry is created immediately, and there's no window where the topic has no session key.
+
+#### 3.2.4 ViewModel: Session Filtering on Connect (with migration)
 
 **Current (broken):**
 ```swift
@@ -191,36 +216,68 @@ self.topics = sessions  // Raw sessions — WRONG
 
 **Required:**
 ```swift
+// Step 1: Migrate existing Session entries to Topic entries (Kieran B4)
+migrateSessionsToTopics()
+
+// Step 2: Fetch sessions from gateway
 let sessions = try await bridge.fetchSessions()
 
-// Filter: only show sessions that map to known topics
-let filteredTopics = self.topics.filter { topic in
-    guard let sessionKey = topic.sessionKey else { return true } // New topic, no session yet
-    return sessions.contains { $0.id == sessionKey }
-}
-
-// Also update lastMessagePreview, unreadCount, lastActivityAt from sessions
+// Step 3: Update topic metadata from matching sessions
 for session in sessions {
     if let topicId = try? topicRepo.resolveTopicId(for: session.id) {
-        // Update topic metadata from session data
-        // (lastMessagePreview, unreadCount, lastActivityAt)
+        // Update lastMessagePreview, unreadCount, lastActivityAt from session data
+        // (future: use ValueObservation for live updates)
     }
 }
 
+// Step 4: Refresh topic list from local DB (not from gateway)
 self.topics = try topicRepo.fetchAllActive()
 ```
 
-#### 3.2.5 TopicListView: Add "New Topic" Button
+**Migration step (Kieran B4):** On first launch after the Gate 2B → 2B.5 update, existing `Session` entries in the DB have no corresponding `Topic` entries. The migration converts them:
+```swift
+private func migrateSessionsToTopics() {
+    // Check if migration is needed
+    let existingTopics = try? topicRepo.fetchAllActive()
+    if let topics = existingTopics, !topics.isEmpty { return } // Already migrated
+    
+    // Convert all existing sessions to topics
+    let sessions = try persistenceStore.fetchSessions(limit: 100, offset: 0)
+    for session in sessions {
+        let gatewayKey = "agent:main:\(session.id.lowercased())"
+        let topic = Topic(
+            id: session.id,
+            name: session.title ?? session.customName ?? session.id,
+            sessionKey: gatewayKey,
+            lastMessagePreview: session.lastMessagePreview,
+            lastActivityAt: session.lastMessageAt ?? session.updatedAt,
+            messageCount: session.messageCount
+        )
+        try? topicRepo.save(topic)
+        try? topicRepo.saveBridge(topicId: topic.id, sessionKey: gatewayKey)
+    }
+}
+```
+
+**Kieran B1 fix:** `BeeChatSessionFilter.isBeeChatSession()` must use the ViewModel's injected `topicRepo` instance, not create a fresh one per call. The static method pattern is fine for macOS (rare, background) but causes MainActor blocking on iOS.
+
+#### 3.2.5 TopicListView: Add "New Topic" Button (Mel UX)
 
 **Current:** Just a list of sessions.
 
 **Required:**
 - Toolbar button (`+`) to create new topic
-- Sheet/alert for entering topic name
+- **iPhone:** Compact sheet with text field "What would you like to talk about?" and Create/Cancel buttons
+- **iPad:** Popover anchored from the `+` button, preserving split-view context
 - After creation, auto-select the new topic and navigate to chat view
-- Show "No conversations yet" empty state when topics list is empty
+- Show "No conversations yet" empty state with prominent "Start a conversation" button when topics list is empty
+- **Secondary path (if legacy sessions exist):** Offer "Import recent sessions" below the main CTA
 
-#### 3.2.6 BeeChatView: Message sending needs topic context
+**Swipe actions (Mel must-have):**
+- Archive: default/non-destructive swipe action
+- Delete: destructive swipe with confirmation alert ("This will permanently delete this conversation and all its messages.")
+
+#### 3.2.6 BeeChatView: Message sending uses topic-resolved session key
 
 **Current:**
 ```swift
@@ -229,19 +286,16 @@ try await bridge.sendMessage(sessionKey: sessionId, text: text)
 
 **Required:**
 ```swift
-// Resolve the topic's session key (may be nil for new topics)
-guard let topicId = selectedTopicId else { return }
-let sessionKey = topicRepo.resolveSessionKey(topicId: topicId) ?? topicId
+// Resolve the topic's session key — always populated (Kieran B2/B3 fix)
+guard let topicId = selectedTopicId,
+      let topic = topics.first(where: { $0.id == topicId }) else { return }
+let sessionKey = topic.sessionKey  // Always "agent:main:<id>" format
 
-// Send message — SyncBridge creates gateway session if needed
+// Send message
 _ = try await bridge.sendMessage(sessionKey: sessionKey, text: text)
-
-// If this was a new topic, update the session key from the gateway response
-if let gatewayKey = response?.sessionKey, gatewayKey != sessionKey {
-    try topicRepo.updateSessionKey(topicId: topicId, sessionKey: gatewayKey)
-    try topicRepo.saveBridge(topicId: topicId, sessionKey: gatewayKey)
-}
 ```
+
+No fallback to bare UUID needed — topics are created with gateway-format keys upfront.
 
 ---
 
