@@ -10,6 +10,7 @@ struct BeeChatMobileApp: App {
         WindowGroup {
             TopicListView(viewModel: viewModel)
                 .task {
+                    NSLog("[BeeChat] App .task firing")
                     do {
                         // Offline-first: load cached data
                         try await viewModel.start()

@@ -4,18 +4,18 @@ import Foundation
 ///
 /// Resolution order:
 /// 1. Environment variables (BEECHAT_GATEWAY_URL + BEECHAT_GATEWAY_TOKEN) — for Xcode scheme injection
-/// 2. Config file in app group container (for production)
+/// 2. Config file in app container (Application Support/BeeChat/gateway-config.json)
 /// 3. Fallback: returns nil (offline mode)
 ///
-/// Note: iOS apps cannot access ~/.openclaw/openclaw.json due to sandboxing.
-/// For simulator development, inject via Xcode scheme environment variables.
+/// For simulator development: seed gateway-config.json via `xcrun simctl` or Xcode scheme env vars.
+/// For production: bundle it or download from a provisioning server.
 public struct GatewayConfigLoader: Sendable {
     public struct Config: Sendable {
         public let url: String
         public let token: String
         public let clientMode: String
 
-        public init(url: String, token: String, clientMode: String = "webchat") {
+        public init(url: String, token: String, clientMode: String = "ui") {
             self.url = url
             self.token = token
             self.clientMode = clientMode
@@ -26,37 +26,41 @@ public struct GatewayConfigLoader: Sendable {
         // 1. Environment variables (Xcode scheme injection for development)
         if let url = ProcessInfo.processInfo.environment["BEECHAT_GATEWAY_URL"],
            let token = ProcessInfo.processInfo.environment["BEECHAT_GATEWAY_TOKEN"] {
-            print("[GatewayConfigLoader] Using environment variable config")
+            NSLog("[GatewayConfigLoader] Using env var config: %@", url)
             return Config(url: url, token: token)
         }
 
-        // 2. Config file — simulator reads ~/.openclaw/openclaw.json, device uses app container
-        let configPath: URL
-        #if targetEnvironment(simulator)
-        // Simulator runs on Mac: use real home directory so dev can edit the file once
-        configPath = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".openclaw/openclaw.json")
-        #else
+        // 2. Config file in app container
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
         guard let dir = appSupport else {
             print("[GatewayConfigLoader] No Application Support directory. Running in offline mode.")
             return nil
         }
-        configPath = dir.appendingPathComponent("BeeChat/gateway-config.json")
-        #endif
+        let configPath = dir.appendingPathComponent("BeeChat/gateway-config.json")
 
         if FileManager.default.fileExists(atPath: configPath.path) {
+            NSLog("[GatewayConfigLoader] Found config at %@", configPath.path)
             do {
                 let data = try Data(contentsOf: configPath)
-                // Try the bundled gateway-config.json format first
+                // Try the bundled gateway-config.json format (url + token + clientMode)
                 if let config = try? JSONDecoder().decode(GatewayFileConfig.self, from: data) {
-                    print("[GatewayConfigLoader] Using file config from \(configPath.path)")
+                    NSLog("[GatewayConfigLoader] Parsed gateway-config.json: url=%@, clientMode=%@", config.url, config.clientMode ?? "ui")
                     return Config(url: config.url, token: config.token, clientMode: config.clientMode ?? "ui")
                 }
-                // Fall back to raw OpenClaw config JSON
+                // Fall back to OpenClaw config JSON (gateway.auth.token + gateway.mode)
                 let raw = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                if let gw = raw?["gateway"] as? [String: Any],
+                   let auth = gw["auth"] as? [String: Any],
+                   let token = auth["token"] as? String {
+                    let mode = gw["mode"] as? String ?? "local"
+                    let url = "ws://127.0.0.1:18789"
+                    print("[GatewayConfigLoader] Using OpenClaw config from \(configPath.path), mode=\(mode), url=\(url)")
+                    return Config(url: url, token: token, clientMode: "ui")
+                }
+                // Try flat gatewayUrl + token format
                 if let url = raw?["gatewayUrl"] as? String,
                    let token = raw?["token"] as? String {
-                    print("[GatewayConfigLoader] Using OpenClaw config from \(configPath.path)")
+                    print("[GatewayConfigLoader] Using flat config from \(configPath.path)")
                     return Config(url: url, token: token, clientMode: "ui")
                 }
             } catch {
@@ -64,9 +68,8 @@ public struct GatewayConfigLoader: Sendable {
             }
         }
 
-        // 3. No config found — offline mode
-        print("[GatewayConfigLoader] No gateway config found. Running in offline mode.")
-        print("[GatewayConfigLoader] Set BEECHAT_GATEWAY_URL and BEECHAT_GATEWAY_TOKEN environment variables in Xcode scheme for development.")
+        // 3. No config found - offline mode
+        NSLog("[GatewayConfigLoader] No gateway config found at %@ - offline mode", configPath.path)
         return nil
     }
 }

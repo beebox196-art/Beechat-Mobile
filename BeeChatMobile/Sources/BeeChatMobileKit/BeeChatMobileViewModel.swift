@@ -38,6 +38,7 @@ public final class BeeChatMobileViewModel {
 
     /// Offline-first startup: load cached data, then optionally connect.
     public func start() async throws {
+        NSLog("[BeeChat] start() called - dbPath=%@", config.dbPath)
         try persistenceStore.openDatabase(at: config.dbPath)
 
         // Seed test data if empty (Gate 2A verification)
@@ -59,11 +60,16 @@ public final class BeeChatMobileViewModel {
     public func connect() async {
         guard syncBridge == nil else { return }
 
+        NSLog("[BeeChat] connect() called - about to load gateway config")
+
         guard let gatewayConfig = GatewayConfigLoader.load() else {
+            NSLog("[BeeChat] GatewayConfigLoader returned nil - no config found")
             connectionState = .error
             connectionError = "No gateway config found. Check ~/.openclaw/openclaw.json"
             return
         }
+        
+        NSLog("[BeeChat] Gateway config loaded: url=%@ clientMode=%@", gatewayConfig.url, gatewayConfig.clientMode)
 
         let clientConfig = GatewayClient.Configuration(
             url: gatewayConfig.url,
@@ -223,7 +229,7 @@ public final class BeeChatMobileViewModel {
 
         let msgs: [BeeChatPersistence.Message] = [
             BeeChatPersistence.Message(id: "m1", sessionId: sessionId, role: "user", content: "Hello Bee! How are you today?", senderName: "Adam", senderId: "adam", timestamp: Date().addingTimeInterval(-10)),
-            BeeChatPersistence.Message(id: "m2", sessionId: sessionId, role: "assistant", content: "Hey Adam! I'm doing great — ready to help with anything you need. 🐝", senderName: "Bee", senderId: "bee", timestamp: Date().addingTimeInterval(-5)),
+            BeeChatPersistence.Message(id: "m2", sessionId: sessionId, role: "assistant", content: "Hey Adam! I'm doing great - ready to help with anything you need. 🐝", senderName: "Bee", senderId: "bee", timestamp: Date().addingTimeInterval(-5)),
             BeeChatPersistence.Message(id: "m3", sessionId: sessionId, role: "user", content: "Can you show me my sessions list?", senderName: "Adam", senderId: "adam", timestamp: Date()),
         ]
         for m in msgs { try persistenceStore.saveMessage(m) }
