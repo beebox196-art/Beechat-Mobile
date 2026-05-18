@@ -92,17 +92,19 @@
 
 **Current state:** App connects to gateway with full operator scopes. 🟢 Online status confirmed. Remaining functional testing (real-time messages, streaming) deferred to Gate 2B.5 verification phase.
 
-#### Gate 2B.5: Topic Architecture 🟡 PHASE 1 v3 SPEC — TEAM REVIEW IN PROGRESS
+#### Gate 2B.5: Topic Architecture 🟢 PHASE 1 SPEC APPROVED — READY FOR IMPLEMENTATION
 **Goal:** Replace raw session list with proper Topic layer (same as macOS BeeChat). Sidebar shows user-created Topics, not gateway sessions.
 
 **Phased approach:** Gate 2B.5 is split into 4 phases, each independently testable with review gates.
 
-**Phase 1: Data Layer (current)** — Topic model, repository, migration, seed data, ViewModel wiring. No UI changes except 3-line type fix.
+**Phase 1: Data Layer (current)** — Topic model, repository, migration, seed data, ViewModel wiring. No UI changes except 4-line type fix.
 
 **Phase 1 spec history:**
 - v1: [GATE-2B5-PHASE1-DATA-LAYER.md](Docs/Architecture/GATE-2B5-PHASE1-DATA-LAYER.md) — BLOCKED by 10 blockers
 - v2: [GATE-2B5-PHASE1-DATA-LAYER-v2.md](Docs/Architecture/GATE-2B5-PHASE1-DATA-LAYER-v2.md) — BLOCKED by 5 blockers (Q B1-B3, Kieran B3b-B3c)
-- **v3 (current):** [GATE-2B5-PHASE1-DATA-LAYER-v3.md](Docs/Architecture/GATE-2B5-PHASE1-DATA-LAYER-v3.md) — All blockers resolved
+- v3: [GATE-2B5-PHASE1-DATA-LAYER-v3.md](Docs/Architecture/GATE-2B5-PHASE1-DATA-LAYER-v3.md) — BLOCKED by Q B11/B12 + Kieran D1
+- **v3.2 (current, team-approved):** [GATE-2B5-PHASE1-DATA-LAYER-v3.2.md](Docs/Architecture/GATE-2B5-PHASE1-DATA-LAYER-v3.2.md) — All blockers resolved
+  - Mel: ✅ APPROVED | Q: ✅ APPROVED | Kieran: ✅ APPROVED (D1 datetime fix applied)
 
 **Architecture spec (parent):**
 - v1: [GATE-2B5-TOPIC-ARCHITECTURE.md](Docs/Architecture/GATE-2B5-TOPIC-ARCHITECTURE.md)
@@ -110,27 +112,24 @@
 - Consolidated review: [GATE-2B5-CONSOLIDATED-REVIEW.md](Docs/Architecture/GATE-2B5-CONSOLIDATED-REVIEW.md)
 - Reviewer reports: [Q](Docs/Architecture/GATE-2B5-Q-REVIEW.md), [Kieran pass 2](Docs/Architecture/GATE-2B5-KIERAN-REVIEW-PASS2.md), [Mel pass 2](Docs/Architecture/GATE-2B5-MEL-REVIEW-PASS2.md)
 
-**Phase 1 v3 resolves all blockers:**
+**Phase 1 v3.2 resolves ALL blockers:**
 - [x] Q B1: Expose `topicRepo` as `public` on `BeeChatPersistenceStore`
-- [x] Q B2: Remove broken `upsertBridge()`, fix `saveBridge()` to use `upsertPreservingCreatedAt()`
-- [x] Q B3a: Allow minimal 3-line change in `TopicListView` (Session→Topic)
+- [x] Q B2/B11: `saveBridge()` uses raw SQL upsert `ON CONFLICT(topicId)` (not `upsertPreservingCreatedAt()`)
+- [x] Q B3a: Allow minimal 4-line change in `TopicListView` (Session→Topic)
+- [x] Q B12: `sessionKey(for topicId:)` helper + resolution in `loadMessages()` and `streamingContent`
+- [x] Q W21: Removed `rpcClient.sessionsSubscribe()` (private + redundant)
 - [x] Kieran B3b: Computed column alias renamed to `messageCount` for GRDB decoding
 - [x] Kieran B3c: `pendingGatewaySync` parameter added to `create(name:pendingGatewaySync:)`
 - [x] Kieran B5: Offline reconciliation via `pendingGatewaySync` + `fetchPendingSyncTopics()`
 - [x] Kieran B6: Migration012 is idempotent (checks columns exist before adding)
 - [x] Kieran B7: UNIQUE index on `openclawSessionKey` in Migration012
-- [x] Kieran B8: `sessionsSubscribe()` in reconnect path
-- [x] Kieran B8 variant: Seed data creates Topics, not Sessions
+- [x] Kieran B8: `SyncBridge.start()` handles session subscription (removed redundant call)
+- [x] Kieran D1: `datetime('now')` instead of `strftime('%s','now')` in raw SQL
+- [x] Q W3: `syncMetadataFromSessions()` method added for gateway→topic metadata sync
+- [x] Q W5: `send()` passes `topic` parameter for context injection
+- [x] Q H1: `saveBridge()` upsert instead of insert-only
 
-**Also resolved in v3:**
-- Q W3: `syncMetadataFromSessions()` method added for gateway→topic metadata sync
-- Q W5: `send()` passes `topic` parameter for context injection
-- Q W12: `send()` resolves topic ID → session key
-- Q H1: `saveBridge()` uses `upsertPreservingCreatedAt()` instead of `save()`
-- Kieran W9-W15: Documented as conventions, known limitations, or deferred
-- Mel M6-M14: Noted for Phase 3 (UI)
-
-**Phase 1 status:** 🔄 v3 spec written — routing to Q, Kieran, Mel for final review
+**Phase 1 status:** 🟢 Spec approved — Q implementing
 
 **Upcoming phases:**
 - Phase 2: ViewModel + Wiring (create topic, offline creation, reconnect)
