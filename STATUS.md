@@ -92,19 +92,35 @@
 
 **Current state:** App connects to gateway with full operator scopes. 🟢 Online status confirmed. Remaining functional testing (real-time messages, streaming) deferred to Gate 2B.5 verification phase.
 
-#### Gate 2B.5: Topic Architecture 📋 SPEC DRAFTED — PENDING TEAM REVIEW
+#### Gate 2B.5: Topic Architecture 🟡 SPEC v2 READY — AWAITING ADAM APPROVAL
 **Goal:** Replace raw session list with proper Topic layer (same as macOS BeeChat). Sidebar shows user-created Topics, not gateway sessions.
-**Spec:** [GATE-2B5-TOPIC-ARCHITECTURE.md](Docs/Architecture/GATE-2B5-TOPIC-ARCHITECTURE.md)
-- [ ] Team review (Kieran adversarial, Mel UX, Gav research, Q builder)
-- [ ] Adam approval
-- [ ] ViewModel: `[Session]` → `[Topic]` with TopicRepository
-- [ ] Session filtering via BeeChatSessionFilter
-- [ ] New Topic creation flow (name entry, gateway session bridge)
-- [ ] Empty state UI ("No conversations yet" + CTA)
-- [ ] TopicListView: "+" button and NewTopicSheet
-- [ ] Message send uses topic-resolved session keys
-- [ ] BeeChat macOS regression test
-- [ ] Kieran sign-off
+**Spec v1:** [GATE-2B5-TOPIC-ARCHITECTURE.md](Docs/Architecture/GATE-2B5-TOPIC-ARCHITECTURE.md)
+**Spec v2 (revised):** [GATE-2B5-TOPIC-ARCHITECTURE-v2.md](Docs/Architecture/GATE-2B5-TOPIC-ARCHITECTURE-v2.md)
+**Consolidated review:** [GATE-2B5-CONSOLIDATED-REVIEW.md](Docs/Architecture/GATE-2B5-CONSOLIDATED-REVIEW.md)
+**Reviewer reports:** [Q](Docs/Architecture/GATE-2B5-Q-REVIEW.md), [Kieran pass 2](Docs/Architecture/GATE-2B5-KIERAN-REVIEW-PASS2.md), [Mel pass 2](Docs/Architecture/GATE-2B5-MEL-REVIEW-PASS2.md)
+
+**All 8 blockers resolved in v2 spec:**
+- [x] B1: All sessionKey:nil references removed — upfront key is only pattern
+- [x] B2: BeeChatSessionFilter overload added — isBeeChatSession(_:topicRepo:)
+- [x] B3: Computed message counts via SQL JOIN — no triggers
+- [x] B4: Atomic migration with GRDB transaction + version tracking
+- [x] B5: pendingGatewaySync flag + reconciliation on connect
+- [x] B6: UNIQUE constraint on openclawSessionKey + upsert
+- [x] B7: sessionsSubscribe() added to reconnect path
+- [x] B8: Seed data creates Topic, not Session
+
+**v2 also includes:**
+- Mel M6-M14 UX specs (sheet, popover, swipe, empty states, offline, VoiceOver, Dynamic Type)
+- Q H1-H4 hidden gotchas (sendMessage topic param, saveBridge upsert, TopicRow refactor, ValueObservation)
+- Two-model architecture documentation (Session = backend, Topic = frontend)
+- 13-step ViewModel implementation plan, 9-step UI plan, 20-item validation checklist
+
+**Next:**
+- [ ] Adam approval of v2 spec
+- [ ] Q implementation
+- [ ] Kieran review of Gate 2B.5 code
+- [ ] Bee validation on simulator
+- [ ] Adam sign-off
 
 #### Gate 2C: End-to-End Send/Receive
 **Goal:** User sends message → gateway processes → reply streams back.
@@ -166,20 +182,27 @@ See [ADR-002](Docs/Decisions/ADR-002-team-driven-development.md) for full detail
 **Bee orchestrates only — never implements code.**
 
 ## Active Blockers
-- **Gate 2C blocked by Gate 2B.5** — send/receive needs topic-resolved session keys, not raw session IDs. Implementing 2C before 2B.5 would embed the wrong architecture.
+- **Gate 2B.5 spec has 8 blockers** — must resolve before Q starts implementation. See consolidated review.
+- **Gate 2C blocked by Gate 2B.5** — send/receive needs topic-resolved session keys, not raw session IDs.
 
 ## Gate 2B.5 Spec
-- **Spec:** [GATE-2B5-TOPIC-ARCHITECTURE.md](Docs/Architecture/GATE-2B5-TOPIC-ARCHITECTURE.md)
-- **Status:** Draft — pending team review (Kieran, Mel, Gav, Q) then Adam approval
-- **Why:** The sidebar currently shows raw gateway sessions (cron jobs, agent sessions, sub-agents). This is the same problem macOS BeeChat had and solved with the Topic layer. The shared v5 packages (Topic, TopicRepository, TopicSessionBridge, BeeChatSessionFilter) already exist — iOS just needs to USE them.
-- **Key decisions for review:**
-  - D1: Use same Topic model as macOS (no iOS-specific divergence)
-  - D2: Sidebar shows only user-created topics (no auto-discovery of sessions)
-  - D3: First message in new topic creates gateway session + bridge entry
+- **Spec v1:** [GATE-2B5-TOPIC-ARCHITECTURE.md](Docs/Architecture/GATE-2B5-TOPIC-ARCHITECTURE.md)
+- **Spec v2 (current):** [GATE-2B5-TOPIC-ARCHITECTURE-v2.md](Docs/Architecture/GATE-2B5-TOPIC-ARCHITECTURE-v2.md)
+- **Consolidated review:** [GATE-2B5-CONSOLIDATED-REVIEW.md](Docs/Architecture/GATE-2B5-CONSOLIDATED-REVIEW.md)
+- **Reviewer reports:** [Q](Docs/Architecture/GATE-2B5-Q-REVIEW.md), [Kieran pass 2](Docs/Architecture/GATE-2B5-KIERAN-REVIEW-PASS2.md), [Mel pass 2](Docs/Architecture/GATE-2B5-MEL-REVIEW-PASS2.md)
+- **Status:** 🟡 v2 spec ready — all 8 blockers resolved, awaiting Adam approval
+- **Verdict:** Architecture is sound. All blockers and UX requirements resolved in v2.
+- **Key decisions:**
+  - D1: Use same Topic model as macOS (no divergence)
+  - D2: Sidebar shows only user-created topics
+  - D3: Topics created with gateway-format sessionKey upfront — NO nil session keys
   - D4: Store all sessions locally, filter on display
   - D5: Seed data uses Topic model
-  - D6: New Topic flow: toolbar "+" → name entry sheet → auto-select → chat
-  - D7: First launch shows empty state with "Start a conversation" button
+  - D6: Chronological ordering (lastActivityAt DESC), not alphabetical
+  - D7: New Topic: compact sheet (iPhone) / popover (iPad), 80-char limit, auto-navigate
+  - D8: Offline creation: pendingGatewaySync flag + reconciliation on connect
+  - D9: Two-model architecture: Session (backend) vs Topic (frontend)
+  - D10: Computed message counts via SQL, no DB triggers
 
 ## Tracked Follow-ups (from Kieran's Gate 2A review, non-blocking)
 - MessageMapper in BeeChatUI not MobileKit (Exyte dep reason — spec drift, harmless)
@@ -200,13 +223,12 @@ See [ADR-002](Docs/Decisions/ADR-002-team-driven-development.md) for full detail
 - **Previous:** 8feebb4 — fix(project.yml): restore proper 3-target module structure (Q's recovery build)
 
 ## Next Steps
-1. Test real-time message delivery (send a message from another client, verify it appears in iOS app)
-2. Test streaming text (agent reply should stream character-by-character)
-3. Test sessions.changed (new sessions appear in topic list)
-4. Test reconnect (kill gateway briefly, verify app reconnects)
-5. Remove debug logging from v5 GatewayClient (file log to Desktop)
-6. Kieran review of Gate 2B changes
-7. Gate 2B sign-off → move to Gate 2C (send/receive)
+1. Adam approval of v2 spec (all 8 blockers resolved)
+2. Remove debug logging from v5 GatewayClient
+3. Gate 2B.5 implementation (Q) — 13 ViewModel steps + 9 UI steps
+4. Kieran review of Gate 2B.5 code
+5. Bee validation on simulator (20-item checklist)
+6. Gate 2B.5 sign-off → move to Gate 2C
 
 ## Context Notes
 - **Parent project:** BeeChat v5 (macOS) — shares Core Swift packages via SPM local dependency
