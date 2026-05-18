@@ -30,20 +30,37 @@ public struct GatewayConfigLoader: Sendable {
             return Config(url: url, token: token)
         }
 
-        // 2. Config file in app container (for bundled/production config)
-        //    Looks for gateway-config.json in the app's Application Support directory
+        // 2. Config file — simulator reads ~/.openclaw/openclaw.json, device uses app container
+        let configPath: URL
+        #if targetEnvironment(simulator)
+        // Simulator runs on Mac: use real home directory so dev can edit the file once
+        configPath = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".openclaw/openclaw.json")
+        #else
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-        if let dir = appSupport {
-            let configPath = dir.appendingPathComponent("BeeChat/gateway-config.json")
-            if FileManager.default.fileExists(atPath: configPath.path) {
-                do {
-                    let data = try Data(contentsOf: configPath)
-                    let config = try JSONDecoder().decode(GatewayFileConfig.self, from: data)
+        guard let dir = appSupport else {
+            print("[GatewayConfigLoader] No Application Support directory. Running in offline mode.")
+            return nil
+        }
+        configPath = dir.appendingPathComponent("BeeChat/gateway-config.json")
+        #endif
+
+        if FileManager.default.fileExists(atPath: configPath.path) {
+            do {
+                let data = try Data(contentsOf: configPath)
+                // Try the bundled gateway-config.json format first
+                if let config = try? JSONDecoder().decode(GatewayFileConfig.self, from: data) {
                     print("[GatewayConfigLoader] Using file config from \(configPath.path)")
-                    return Config(url: config.url, token: config.token, clientMode: config.clientMode ?? "webchat")
-                } catch {
-                    print("[GatewayConfigLoader] Failed to parse gateway-config.json: \(error)")
+                    return Config(url: config.url, token: config.token, clientMode: config.clientMode ?? "ui")
                 }
+                // Fall back to raw OpenClaw config JSON
+                let raw = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                if let url = raw?["gatewayUrl"] as? String,
+                   let token = raw?["token"] as? String {
+                    print("[GatewayConfigLoader] Using OpenClaw config from \(configPath.path)")
+                    return Config(url: url, token: token, clientMode: "ui")
+                }
+            } catch {
+                print("[GatewayConfigLoader] Failed to parse config at \(configPath.path): \(error)")
             }
         }
 
