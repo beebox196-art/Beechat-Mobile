@@ -68,7 +68,8 @@ public struct BeeChatView: View {
     private var mergedMessages: [ExyteChat.Message] {
         guard let topicId = viewModel.selectedTopicId,
               viewModel.isStreaming,
-              let streamingText = viewModel.streamingContent[topicId],
+              let key = viewModel.sessionKey(for: topicId),
+              let streamingText = viewModel.streamingContent[key],
               !streamingText.isEmpty else {
             return messages
         }
@@ -98,9 +99,10 @@ public struct BeeChatView: View {
     }
 
     private func loadMessages() {
-        guard let topicId = viewModel.selectedTopicId else { messages = []; return }
+        guard let topicId = viewModel.selectedTopicId,
+              let key = viewModel.sessionKey(for: topicId) else { messages = []; return }
         Task {
-            let msgs = (try? viewModel.messages(for: topicId)) ?? []
+            let msgs = (try? viewModel.messages(for: key)) ?? []
             let mapped = MessageMapper.exyteMessages(from: msgs)
             if viewModel.selectedTopicId == topicId {
                 self.messages = mapped

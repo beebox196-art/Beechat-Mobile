@@ -195,7 +195,7 @@ public final class BeeChatMobileViewModel {
     }
 
     /// Resolve a Topic ID to the session key used for message lookups.
-    private func sessionKey(for topicId: String) -> String? {
+    public func sessionKey(for topicId: String) -> String? {
         return topics.first(where: { $0.id == topicId })?.sessionKey
     }
 
