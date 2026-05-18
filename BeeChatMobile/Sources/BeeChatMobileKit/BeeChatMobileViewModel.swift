@@ -79,7 +79,8 @@ public final class BeeChatMobileViewModel {
                 id: "openclaw-ios",
                 version: "1.0",
                 platform: "ios",
-                mode: gatewayConfig.clientMode
+                mode: gatewayConfig.clientMode,
+                deviceFamily: "mobile"
             )
         )
 
