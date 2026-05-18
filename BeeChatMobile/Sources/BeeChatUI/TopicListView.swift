@@ -35,7 +35,7 @@ public struct TopicListView: View {
             if let topicId = viewModel.selectedTopicId {
                 BeeChatView(viewModel: viewModel)
                     .id(topicId)
-                    .navigationTitle(viewModel.topics.first(where: { $0.id == topicId })?.title ?? "Chat")
+                    .navigationTitle(viewModel.topics.first(where: { $0.id == topicId })?.name ?? "Chat")
             } else {
                 Text("Select a topic")
                     .foregroundStyle(.secondary)
@@ -60,11 +60,11 @@ public struct TopicListView: View {
 }
 
 struct TopicRow: View {
-    let topic: Session
+    let topic: Topic
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(topic.title ?? topic.customName ?? "Untitled")
+            Text(topic.name)
                 .font(.headline)
             if let preview = topic.lastMessagePreview {
                 Text(preview)
@@ -73,7 +73,7 @@ struct TopicRow: View {
                     .lineLimit(1)
             }
             HStack {
-                Text(topic.lastMessageAt?.formatted(.relative(presentation: .named)) ?? "")
+                Text(topic.lastActivityAt?.formatted(.relative(presentation: .named)) ?? "")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
                 Spacer()

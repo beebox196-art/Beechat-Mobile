@@ -10,7 +10,7 @@ public final class BeeChatMobileViewModel {
     // MARK: - Public State
 
     /// UI-facing property: topics (formerly sessions)
-    public var topics: [Session] = []
+    public var topics: [Topic] = []
     public var selectedTopicId: String? = nil
     public var connectionState: ConnectionState = .disconnected
     public var isStreaming: Bool = false
@@ -42,15 +42,15 @@ public final class BeeChatMobileViewModel {
         try persistenceStore.openDatabase(at: config.dbPath)
 
         // Seed test data if empty (Gate 2A verification)
-        let existing = try persistenceStore.fetchSessions(limit: 1, offset: 0)
+        let existing = try persistenceStore.topicRepo.fetchAllActive(limit: 1)
         if existing.isEmpty {
             try seedTestData()
         }
 
-        // Load initial sessions from local DB
-        self.topics = try persistenceStore.fetchSessions(limit: 100, offset: 0)
+        // Load initial topics from local DB
+        self.topics = try persistenceStore.topicRepo.fetchAllActiveWithCounts()
 
-        // Auto-select first session
+        // Auto-select first topic
         if selectedTopicId == nil, let first = topics.first {
             selectedTopicId = first.id
         }
@@ -68,7 +68,7 @@ public final class BeeChatMobileViewModel {
             connectionError = "No gateway config found. Check ~/.openclaw/openclaw.json"
             return
         }
-        
+
         NSLog("[BeeChat] Gateway config loaded: url=%@ clientMode=%@", gatewayConfig.url, gatewayConfig.clientMode)
 
         let clientConfig = GatewayClient.Configuration(
@@ -108,14 +108,58 @@ public final class BeeChatMobileViewModel {
         do {
             try await bridge.start()
 
-            // Fetch sessions from gateway
+            // 1. Reconcile pending offline topics
+            let pendingTopics = try persistenceStore.topicRepo.fetchPendingSyncTopics()
+            for topic in pendingTopics {
+                guard let sessionKey = topic.sessionKey else { continue }
+                do {
+                    _ = try await bridge.sendMessage(sessionKey: sessionKey, text: "Start", topic: topic)
+                    try persistenceStore.topicRepo.markSynced(topicId: topic.id)
+                } catch {
+                    print("[ViewModel] Failed to reconcile topic \(topic.id): \(error)")
+                }
+            }
+
+            // 2. Fetch sessions from gateway
             let sessions = try await bridge.fetchSessions()
-            self.topics = sessions
-            if self.selectedTopicId == nil, let first = sessions.first {
+
+            // 3. Filter to only BeeChat sessions (using injected repo)
+            let beeChatSessions = sessions.filter { session in
+                (try? BeeChatSessionFilter.isBeeChatSession(session.id, topicRepo: persistenceStore.topicRepo)) == true
+            }
+
+            // 4. Create topics for new gateway sessions without a topic
+            for gatewaySession in beeChatSessions {
+                if try persistenceStore.topicRepo.resolveTopicId(for: gatewaySession.id) == nil {
+                    let topic = Topic(
+                        id: UUID().uuidString,
+                        name: gatewaySession.title ?? gatewaySession.customName ?? "Conversation",
+                        lastMessagePreview: gatewaySession.lastMessagePreview,
+                        lastActivityAt: gatewaySession.lastMessageAt ?? gatewaySession.updatedAt,
+                        unreadCount: gatewaySession.unreadCount,
+                        sessionKey: gatewaySession.id
+                    )
+                    try persistenceStore.topicRepo.save(topic)
+                    do {
+                        try persistenceStore.topicRepo.saveBridge(topicId: topic.id, sessionKey: gatewaySession.id)
+                    } catch {
+                        print("[ViewModel] Bridge already exists for session \(gatewaySession.id): \(error)")
+                    }
+                }
+            }
+
+            // 5. Sync metadata from BeeChat sessions to local topics
+            try persistenceStore.topicRepo.syncMetadataFromSessions(beeChatSessions)
+
+            // 6. Refresh topic list
+            self.topics = try persistenceStore.topicRepo.fetchAllActiveWithCounts()
+
+            // 7. Auto-select first topic
+            if self.selectedTopicId == nil, let first = topics.first {
                 self.selectedTopicId = first.id
             }
 
-            // Start message observation for all known sessions
+            // 8. Session subscription is handled by SyncBridge.start()
             startMessageObservation()
         } catch {
             connectionState = .error
@@ -150,13 +194,25 @@ public final class BeeChatMobileViewModel {
         try persistenceStore.fetchMessages(sessionId: sessionId, limit: 200, before: nil)
     }
 
-    public func send(text: String, to sessionId: String) async throws {
+    /// Resolve a Topic ID to the session key used for message lookups.
+    private func sessionKey(for topicId: String) -> String? {
+        return topics.first(where: { $0.id == topicId })?.sessionKey
+    }
+
+    public func send(text: String, to topicId: String) async throws {
+        guard let topic = topics.first(where: { $0.id == topicId }),
+              let sessionKey = topic.sessionKey else {
+            throw NSError(domain: "BeeChat", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Topic has no session key"
+            ])
+        }
+
         guard let bridge = syncBridge else {
             // Offline-only: write to local DB
             let idempotencyKey = UUID().uuidString
             let msg = BeeChatPersistence.Message(
                 id: idempotencyKey,
-                sessionId: sessionId,
+                sessionId: sessionKey,
                 role: "user",
                 content: text,
                 senderName: "Adam",
@@ -167,7 +223,7 @@ public final class BeeChatMobileViewModel {
             return
         }
 
-        _ = try await bridge.sendMessage(sessionKey: sessionId, text: text)
+        _ = try await bridge.sendMessage(sessionKey: sessionKey, text: text, topic: topic)
     }
 
     // MARK: - Streaming
@@ -216,22 +272,34 @@ public final class BeeChatMobileViewModel {
     // MARK: - Seed Data
 
     private func seedTestData() throws {
-        let sessionId = "seed-session-1"
-        let session = Session(
-            id: sessionId,
-            agentId: "bee",
-            title: "Welcome to BeeChat",
-            lastMessageAt: Date(),
-            updatedAt: Date(),
-            createdAt: Date(),
-            messageCount: 3
-        )
-        try persistenceStore.saveSession(session)
+        let topicRepo = persistenceStore.topicRepo
 
+        // Create 3 seed topics with gateway-format keys
+        let topic1 = try topicRepo.create(name: "Welcome to BeeChat")
+        let topic2 = try topicRepo.create(name: "Solar Dashboard Help")
+        let topic3 = try topicRepo.create(name: "Project Planning")
+
+        // Save test messages linked to topic1's session key
+        guard let sessionKey = topic1.sessionKey else { return }
         let msgs: [BeeChatPersistence.Message] = [
-            BeeChatPersistence.Message(id: "m1", sessionId: sessionId, role: "user", content: "Hello Bee! How are you today?", senderName: "Adam", senderId: "adam", timestamp: Date().addingTimeInterval(-10)),
-            BeeChatPersistence.Message(id: "m2", sessionId: sessionId, role: "assistant", content: "Hey Adam! I'm doing great - ready to help with anything you need. 🐝", senderName: "Bee", senderId: "bee", timestamp: Date().addingTimeInterval(-5)),
-            BeeChatPersistence.Message(id: "m3", sessionId: sessionId, role: "user", content: "Can you show me my sessions list?", senderName: "Adam", senderId: "adam", timestamp: Date()),
+            BeeChatPersistence.Message(
+                id: "m1", sessionId: sessionKey, role: "user",
+                content: "Hello Bee! How are you today?",
+                senderName: "Adam", senderId: "adam",
+                timestamp: Date().addingTimeInterval(-10)
+            ),
+            BeeChatPersistence.Message(
+                id: "m2", sessionId: sessionKey, role: "assistant",
+                content: "Hey Adam! I'm doing great - ready to help with anything you need. 🐝",
+                senderName: "Bee", senderId: "bee",
+                timestamp: Date().addingTimeInterval(-5)
+            ),
+            BeeChatPersistence.Message(
+                id: "m3", sessionId: sessionKey, role: "user",
+                content: "Can you show me my sessions list?",
+                senderName: "Adam", senderId: "adam",
+                timestamp: Date()
+            ),
         ]
         for m in msgs { try persistenceStore.saveMessage(m) }
     }
@@ -240,7 +308,7 @@ public final class BeeChatMobileViewModel {
 
     private func refreshTopics() {
         do {
-            self.topics = try persistenceStore.fetchSessions(limit: 100, offset: 0)
+            self.topics = try persistenceStore.topicRepo.fetchAllActiveWithCounts()
         } catch {
             print("[ViewModel] Failed to refresh topics: \(error)")
         }
