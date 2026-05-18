@@ -1,7 +1,7 @@
 # BeeChat Mobile Status
 
-**Phase:** Gate 2 — Real Data Pipeline (Gate 2A ✅ VALIDATED + team-audited, ready for Gate 2B)
-**Last Updated:** 2026-05-16
+**Phase:** Gate 2 — Real Data Pipeline (Gate 2A ✅, Gate 2B 🔄 IN PROGRESS — WebSocket connects, scope issue pending)
+**Last Updated:** 2026-05-18
 
 ## Research-First Gate
 - [x] Phase 0 Prior Art Survey complete
@@ -69,16 +69,24 @@
 
 **Recovery:** 2026-05-16 — Bee breached protocol (implemented instead of orchestrating), team audit confirmed salvageable. Recovery: `git restore` → Q rebuilt → Kieran validated. Commit: `8feebb4`.
 
-#### Gate 2B: Live Gateway Connection
+#### Gate 2B: Live Gateway Connection 🔄 IN PROGRESS
 **Goal:** Connect to real OpenClaw gateway, receive messages in real-time. Send not required.
-- [ ] Fix default gateway port (code: :3000, should be :18789)
-- [ ] App connects to gateway on launch
-- [ ] Connection state visible in UI
-- [ ] Incoming messages render in real-time
-- [ ] Streaming text (delta events) updates character-by-character
-- [ ] Session list updates on `sessions.changed`
+- [x] Fix default gateway port (:3000 → :18789)
+- [x] Fix localhost → 127.0.0.1 (iOS simulator IPv6)
+- [x] App connects to gateway on launch
+- [x] Connection state visible in UI (disconnected → connecting → connected / error)
+- [x] Offline banner with retry action (spec text: "Offline. Showing cached messages.")
+- [x] ConnectionStatusView tappable with retry (Kieran #3)
+- [x] Sessions → Topics rename throughout UI
+- [x] GatewayConfigLoader reads from env vars or file (iOS sandbox safe)
+- [ ] **BLOCKER: sessions.subscribe rejected with "missing scope: operator.read"** — gateway auth needs mobile client scope config
+- [ ] Incoming messages render in real-time (blocked by scope issue)
+- [ ] Streaming text (delta events) updates character-by-character (blocked by scope issue)
+- [ ] Session list updates on sessions.changed (blocked by scope issue)
 - [ ] Reconnect works after brief disconnect
-- [ ] Cached data shows immediately on launch (offline-first)
+- [ ] Cached data shows immediately on launch (offline-first) ✅ (works without gateway)
+
+**Current state:** App builds, runs, connects to gateway. WebSocket handshake succeeds. But `sessions.subscribe` RPC is rejected because the mobile client doesn't have the `operator.read` scope. This is a gateway-side auth configuration issue, not a client bug.
 
 #### Gate 2C: End-to-End Send/Receive
 **Goal:** User sends message → gateway processes → reply streams back.
