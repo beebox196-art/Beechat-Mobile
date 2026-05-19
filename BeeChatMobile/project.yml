@@ -46,6 +46,9 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: "com.ambox.beechatmobile"
         INFOPLIST_FILE: Sources/App/Info.plist
+        INFOPLIST_KEY_NSCameraUsageDescription: "BeeChat uses the camera to take photos for messages."
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: "BeeChat uses the microphone for voice dictation of messages."
+        INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "BeeChat uses the photo library to select photos for messages."
         SWIFT_VERSION: "5.0"
     dependencies:
       - target: BeeChatMobileKit
