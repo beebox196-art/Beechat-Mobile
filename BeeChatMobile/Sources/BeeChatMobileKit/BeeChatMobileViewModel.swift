@@ -199,6 +199,171 @@ public final class BeeChatMobileViewModel {
         return topics.first(where: { $0.id == topicId })?.sessionKey
     }
 
+    // MARK: - Topic Management
+
+    /// Create a new topic with a user-provided name.
+    /// Generates an upfront gateway-format session key and bridge entry.
+    /// If the gateway is connected, sends a bootstrap message immediately.
+    /// If offline, sets pendingGatewaySync = true for later reconciliation.
+    ///
+    /// - Parameter name: Display name (1-80 chars, trimmed)
+    /// - Returns: The created Topic
+    public func createTopic(name: String) throws -> Topic {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw TopicError.nameRequired
+        }
+        guard trimmed.count <= 80 else {
+            throw TopicError.nameTooLong(count: trimmed.count)
+        }
+
+        let isOffline = syncBridge == nil || connectionState != .connected
+        let topic = try persistenceStore.topicRepo.create(
+            name: trimmed,
+            pendingGatewaySync: isOffline
+        )
+
+        // If connected, send bootstrap immediately
+        if !isOffline, let bridge = syncBridge, let sessionKey = topic.sessionKey {
+            Task {
+                do {
+                    _ = try await bridge.sendMessage(sessionKey: sessionKey, text: "Start", topic: topic)
+                    try persistenceStore.topicRepo.markSynced(topicId: topic.id)
+                } catch {
+                    print("[ViewModel] Bootstrap send failed for \(topic.id): \(error)")
+                    // Topic stays pending — will reconcile on next connect
+                }
+            }
+        }
+
+        // Refresh and auto-select
+        self.topics = try persistenceStore.topicRepo.fetchAllActiveWithCounts()
+        self.selectedTopicId = topic.id
+        return topic
+    }
+
+    /// Archive a topic. Removes it from the active list.
+    /// Uses the existing TopicRepository.archive(topicId:) method which
+    /// performs a surgical SQL UPDATE (no stale in-memory data risk).
+    /// Returns the archived topic for undo support.
+    public func archiveTopic(id: String) throws -> Topic? {
+        // Fetch the topic before archiving (for undo)
+        guard let topic = try persistenceStore.topicRepo.fetchById(id) else { return nil }
+        guard !topic.isArchived else { return nil }
+
+        // Use the existing repo method — direct SQL UPDATE
+        try persistenceStore.topicRepo.archive(topicId: id)
+
+        // Refresh list
+        self.topics = try persistenceStore.topicRepo.fetchAllActiveWithCounts()
+
+        // If archived topic was selected, select the first remaining
+        if selectedTopicId == id {
+            selectedTopicId = topics.first?.id
+        }
+
+        return topic
+    }
+
+    /// Restore an archived topic. Used for undo support.
+    /// Re-selects the restored topic so the user sees it immediately.
+    public func unarchiveTopic(id: String) throws {
+        guard var topic = try persistenceStore.topicRepo.fetchById(id) else { return }
+        topic.isArchived = false
+        topic.updatedAt = Date()
+        try persistenceStore.topicRepo.save(topic)
+        self.topics = try persistenceStore.topicRepo.fetchAllActiveWithCounts()
+
+        // Re-select the restored topic
+        self.selectedTopicId = topic.id
+    }
+
+    /// Delete a topic and all associated data (messages, bridge entry).
+    /// This is permanent and cannot be undone.
+    /// The caller must show a confirmation dialog before calling this.
+    public func deleteTopic(id: String) throws {
+        try persistenceStore.topicRepo.deleteCascading(id)
+
+        // Refresh list
+        self.topics = try persistenceStore.topicRepo.fetchAllActiveWithCounts()
+
+        // If deleted topic was selected, select the first remaining
+        if selectedTopicId == id {
+            selectedTopicId = topics.first?.id
+        }
+    }
+
+    // MARK: - Import Sessions
+
+    /// Fetch candidate sessions that could be imported as topics.
+    /// These are gateway sessions that don't already have a local topic bridge.
+    /// Filters out known system/cron session patterns.
+    public func importCandidates() async throws -> [Session] {
+        guard let bridge = syncBridge else {
+            throw TopicError.gatewayNotConnected
+        }
+
+        let sessions = try await bridge.fetchSessions()
+        let existingKeys = try persistenceStore.topicRepo.fetchAllActiveSessionKeys()
+
+        // Filter to sessions that don't already have a bridge entry
+        let candidates = sessions.filter { session in
+            !existingKeys.contains(session.id)
+        }
+
+        // Filter out known system/cron/agent session patterns
+        let filtered = candidates.filter { session in
+            let id = session.id.lowercased()
+            let systemPrefixes = ["cron:", "schedule:", "luna-", "gav-", "kieran-", "q-"]
+            return !systemPrefixes.contains(where: { id.hasPrefix($0) })
+        }
+
+        return filtered
+    }
+
+    /// Create topics from selected gateway sessions.
+    /// Uses the existing gateway session key to preserve message history.
+    /// Each import is wrapped in a GRDB write transaction for atomicity.
+    /// On bridge failure (UNIQUE constraint), the transaction rolls back —
+    /// no orphaned topic, no deleted messages.
+    ///
+    /// - Returns: The number of topics successfully created.
+    public func importSelected(_ sessions: [Session]) throws -> Int {
+        let existingKeys = try persistenceStore.topicRepo.fetchAllActiveSessionKeys()
+        var count = 0
+
+        for session in sessions {
+            // Pre-check: skip if session already has a bridge.
+            // This reduces violations but doesn't guarantee prevention (TOCTOU race).
+            if existingKeys.contains(session.id) {
+                continue
+            }
+
+            let topic = Topic(
+                id: UUID().uuidString,
+                name: session.title ?? session.customName ?? "Conversation",
+                lastMessagePreview: session.lastMessagePreview,
+                lastActivityAt: session.lastMessageAt ?? session.updatedAt,
+                unreadCount: session.unreadCount,
+                sessionKey: session.id
+            )
+
+            // Atomic transaction: topic + bridge saved together, or neither.
+            do {
+                try persistenceStore.topicRepo.saveAndBridgeInTransaction(topic, sessionKey: session.id)
+                count += 1
+            } catch {
+                // Transaction rolled back — topic was never persisted.
+                // No cleanup needed. No messages deleted.
+                print("[ViewModel] Import failed for session \(session.id): \(error)")
+            }
+        }
+
+        // Refresh
+        self.topics = try persistenceStore.topicRepo.fetchAllActiveWithCounts()
+        return count
+    }
+
     public func send(text: String, to topicId: String) async throws {
         guard let topic = topics.first(where: { $0.id == topicId }),
               let sessionKey = topic.sessionKey else {
@@ -311,6 +476,23 @@ public final class BeeChatMobileViewModel {
             self.topics = try persistenceStore.topicRepo.fetchAllActiveWithCounts()
         } catch {
             print("[ViewModel] Failed to refresh topics: \(error)")
+        }
+    }
+}
+
+public enum TopicError: LocalizedError, Sendable {
+    case nameRequired
+    case nameTooLong(count: Int)
+    case gatewayNotConnected
+    
+    public var errorDescription: String? {
+        switch self {
+        case .nameRequired:
+            return "Topic name is required"
+        case .nameTooLong(let count):
+            return "Topic name must be 80 characters or less (currently \(count))"
+        case .gatewayNotConnected:
+            return "Gateway is not connected"
         }
     }
 }

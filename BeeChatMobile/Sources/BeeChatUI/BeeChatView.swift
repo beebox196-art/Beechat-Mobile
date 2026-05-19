@@ -6,8 +6,12 @@ import BeeChatPersistence
 public struct BeeChatView: View {
     @State public var viewModel: BeeChatMobileViewModel
     @State private var messages: [ExyteChat.Message] = []
-    @State private var draft: String = ""
     @State private var streamingMessageId: String = "streaming-msg"
+
+    // Draft preservation across online/offline transitions (B3 fix)
+    @State private var preservedDraft: String = ""
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     public init(viewModel: BeeChatMobileViewModel) {
         self.viewModel = viewModel
@@ -15,87 +19,34 @@ public struct BeeChatView: View {
 
     public var body: some View {
         VStack(spacing: 0) {
-            // Wire connection status into view hierarchy with retry action
             ConnectionStatusView(
                 state: viewModel.connectionState,
                 onRetry: {
-                    Task {
-                        await viewModel.reconnect()
-                    }
+                    Task { await viewModel.reconnect() }
                 }
             )
 
-            ChatView(messages: mergedMessages) { draft in
-                guard let topicId = viewModel.selectedTopicId else { return }
-                Task {
-                    do {
-                        try await viewModel.send(text: draft.text, to: topicId)
-                        loadMessages()
-                    } catch {
-                        viewModel.connectionError = error.localizedDescription
-                    }
-                }
-            }
-            .overlay {
-                // Display streaming indicator when active
-                if viewModel.isStreaming {
-                    VStack {
-                        StreamingIndicatorView()
-                        Spacer()
-                    }
-                    .padding(.top, 8)
-                }
+            // B1 fix: Switch between two separate View structs.
+            // Each has its own concrete ChatView generic type — valid Swift conditional.
+            if viewModel.connectionState == .connected {
+                OnlineChatView(
+                    viewModel: viewModel,
+                    messages: messages,
+                    preservedDraft: $preservedDraft
+                )
+            } else {
+                OfflineChatView(
+                    viewModel: viewModel,
+                    messages: messages,
+                    preservedDraft: preservedDraft
+                )
             }
         }
-        .onAppear {
-            loadMessages()
-        }
-        .onChange(of: viewModel.selectedTopicId) { _, _ in
-            loadMessages()
-        }
-        .onChange(of: viewModel.streamingContent) { _, _ in
-            updateStreamingMessage()
-        }
+        .onAppear { loadMessages() }
+        .onChange(of: viewModel.selectedTopicId) { _, _ in loadMessages() }
         .onChange(of: viewModel.isStreaming) { _, newValue in
-            if !newValue {
-                // Streaming ended, refresh messages
-                loadMessages()
-            }
+            if !newValue { loadMessages() }
         }
-    }
-
-    /// Merge persisted messages with live streaming content
-    private var mergedMessages: [ExyteChat.Message] {
-        guard let topicId = viewModel.selectedTopicId,
-              viewModel.isStreaming,
-              let key = viewModel.sessionKey(for: topicId),
-              let streamingText = viewModel.streamingContent[key],
-              !streamingText.isEmpty else {
-            return messages
-        }
-
-        var merged = messages
-        // Remove any existing streaming message
-        merged.removeAll { $0.id == streamingMessageId }
-
-        let streamingMsg = ExyteChat.Message(
-            id: streamingMessageId,
-            user: ExyteChat.User(
-                id: "bee",
-                name: "Bee",
-                avatarURL: nil,
-                isCurrentUser: false
-            ),
-            status: .sent,
-            createdAt: Date(),
-            text: streamingText
-        )
-        merged.append(streamingMsg)
-        return merged
-    }
-
-    private func updateStreamingMessage() {
-        // onChange handles the refresh automatically via mergedMessages
     }
 
     private func loadMessages() {
