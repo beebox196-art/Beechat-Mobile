@@ -3,6 +3,7 @@ import SwiftUI
 struct EmptyTopicsView: View {
     let hasImportableSessions: Bool
     let isLoading: Bool
+    let showArchiveToast: Bool  // When true, add bottom padding to avoid overlap with undo toast
     let onStartConversation: () -> Void
     let onImportSessions: (() -> Void)?
 
@@ -54,5 +55,7 @@ struct EmptyTopicsView: View {
 
             Spacer()
         }
+        // When archive toast is showing, push content up so buttons aren't obscured
+        .padding(.bottom, showArchiveToast ? 60 : 0)
     }
 }

@@ -51,10 +51,13 @@ public struct TopicListView: View {
                     EmptyTopicsView(
                         hasImportableSessions: importCandidateCount > 0,
                         isLoading: isLoadingCandidateCount,
+                        showArchiveToast: showArchiveUndo,
                         onStartConversation: { isShowingNewTopicSheet = true },
                         onImportSessions: importCandidateCount > 0 ? {
-                            Task { await loadImportCandidates() }
-                            isShowingImportSheet = true
+                            Task {
+                                await loadImportCandidates()
+                                isShowingImportSheet = true
+                            }
                         } : nil
                     )
                 } else {

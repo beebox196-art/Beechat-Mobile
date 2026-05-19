@@ -11,7 +11,7 @@ struct OfflineChatView: View {
     /// Read-only preserved draft from OnlineChatView — shown in placeholder text
     /// so the user has visual context of what they were typing before going offline.
     let preservedDraft: String
-    @State private var streamingMessageId: String = "streaming-msg"
+    private static let streamingMessageId = "streaming-msg"
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -57,7 +57,7 @@ struct OfflineChatView: View {
         MergedMessagesHelper.merge(
             messages: messages,
             viewModel: viewModel,
-            streamingMessageId: streamingMessageId
+            streamingMessageId: Self.streamingMessageId
         )
     }
 }

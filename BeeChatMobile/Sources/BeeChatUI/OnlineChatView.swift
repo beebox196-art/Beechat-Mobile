@@ -11,7 +11,7 @@ struct OnlineChatView: View {
     /// Binding to preserved draft — we can clear it on successful send
     /// because the online view has access to Exyte's draft state.
     @Binding var preservedDraft: String
-    @State private var streamingMessageId: String = "streaming-msg"
+    private static let streamingMessageId = "streaming-msg"
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -53,7 +53,7 @@ struct OnlineChatView: View {
         MergedMessagesHelper.merge(
             messages: messages,
             viewModel: viewModel,
-            streamingMessageId: streamingMessageId
+            streamingMessageId: Self.streamingMessageId
         )
     }
 }
