@@ -11,6 +11,9 @@ struct OfflineChatView: View {
     /// Read-only preserved draft from OnlineChatView — shown in placeholder text
     /// so the user has visual context of what they were typing before going offline.
     let preservedDraft: String
+    /// Hotfix 1: Callback to trigger message reload after send.
+    /// Currently unused (offline input is disabled) but wired for consistency.
+    var onMessageSent: () -> Void
     private static let streamingMessageId = "streaming-msg"
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion

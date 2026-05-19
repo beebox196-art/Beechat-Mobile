@@ -10,6 +10,8 @@ public struct BeeChatView: View {
 
     // Draft preservation across online/offline transitions (B3 fix)
     @State private var preservedDraft: String = ""
+    // Hotfix 1: Trigger message reload after send
+    @State private var messageVersion: Int = 0
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -32,13 +34,15 @@ public struct BeeChatView: View {
                 OnlineChatView(
                     viewModel: viewModel,
                     messages: messages,
-                    preservedDraft: $preservedDraft
+                    preservedDraft: $preservedDraft,
+                    onMessageSent: { messageVersion += 1 }
                 )
             } else {
                 OfflineChatView(
                     viewModel: viewModel,
                     messages: messages,
-                    preservedDraft: preservedDraft
+                    preservedDraft: preservedDraft,
+                    onMessageSent: { messageVersion += 1 }
                 )
             }
         }
@@ -47,6 +51,7 @@ public struct BeeChatView: View {
         .onChange(of: viewModel.isStreaming) { _, newValue in
             if !newValue { loadMessages() }
         }
+        .onChange(of: messageVersion) { _, _ in loadMessages() }
     }
 
     private func loadMessages() {

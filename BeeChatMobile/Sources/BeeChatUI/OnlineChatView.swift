@@ -11,6 +11,8 @@ struct OnlineChatView: View {
     /// Binding to preserved draft — we can clear it on successful send
     /// because the online view has access to Exyte's draft state.
     @Binding var preservedDraft: String
+    /// Hotfix 1: Callback to trigger message reload after successful send.
+    var onMessageSent: () -> Void
     private static let streamingMessageId = "streaming-msg"
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -22,6 +24,7 @@ struct OnlineChatView: View {
                 do {
                     try await viewModel.send(text: draft.text, to: topicId)
                     preservedDraft = ""  // Clear on successful send
+                    onMessageSent()      // Hotfix 1: Trigger reload
                 } catch {
                     viewModel.connectionError = error.localizedDescription
                 }
