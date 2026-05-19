@@ -372,19 +372,20 @@ public final class BeeChatMobileViewModel {
             ])
         }
 
+        // Persist user message locally for immediate display (both online and offline paths)
+        let userMessage = BeeChatPersistence.Message(
+            id: UUID().uuidString,
+            sessionId: sessionKey,
+            role: "user",
+            content: text,
+            senderName: "Adam",
+            senderId: "adam",
+            timestamp: Date()
+        )
+        try persistenceStore.saveMessage(userMessage)
+
         guard let bridge = syncBridge else {
-            // Offline-only: write to local DB
-            let idempotencyKey = UUID().uuidString
-            let msg = BeeChatPersistence.Message(
-                id: idempotencyKey,
-                sessionId: sessionKey,
-                role: "user",
-                content: text,
-                senderName: "Adam",
-                senderId: "adam",
-                timestamp: Date()
-            )
-            try persistenceStore.saveMessage(msg)
+            // Offline-only: message already persisted above
             return
         }
 

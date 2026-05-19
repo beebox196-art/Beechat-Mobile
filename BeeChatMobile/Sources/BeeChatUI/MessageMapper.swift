@@ -30,6 +30,25 @@ public struct MessageMapper {
     }
 
     public static func exyteMessages(from messages: [BeeChatPersistence.Message], currentUserId: String = "adam") -> [ExyteChat.Message] {
-        messages.map { exyteMessage(from: $0, currentUserId: currentUserId) }
+        var result: [ExyteChat.Message] = []
+        var lastUserContent: [String: Date] = [:]  // content -> timestamp, for dedup
+
+        for message in messages {
+            // Dedup: skip if a message with same role+content was already added within 2 seconds
+            if message.role == "user", let content = message.content, let existingTime = lastUserContent[content] {
+                if abs(message.timestamp.timeIntervalSince(existingTime)) < 2.0 {
+                    continue  // Skip duplicate
+                }
+            }
+
+            let exyteMsg = exyteMessage(from: message, currentUserId: currentUserId)
+            result.append(exyteMsg)
+
+            if message.role == "user", let content = message.content {
+                lastUserContent[content] = message.timestamp
+            }
+        }
+
+        return result
     }
 }
