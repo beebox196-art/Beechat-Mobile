@@ -8,7 +8,23 @@ import Foundation
 /// 3. Fallback: returns nil (offline mode)
 ///
 /// For simulator development: seed gateway-config.json via `xcrun simctl` or Xcode scheme env vars.
+/// For real device development: use Tailscale Serve URL (wss://...) over tailnet.
 /// For production: bundle it or download from a provisioning server.
+///
+/// ## Swap-out Architecture
+///
+/// The app never imports Tailscale or uses the Tailscale SDK. It just connects to a URL.
+/// Tailscale makes that URL reachable. Swapping to any alternative is one config change,
+/// zero code changes.
+///
+/// | Scenario | Swap to | URL pattern |
+/// |---|---|---|
+/// | Tailscale adds costs we don't want | LAN IP (same network) | ws://192.168.x.x:18789 |
+/// | Going public with the app | Public server with DNS + SSL | wss://beechat.example.com/ws |
+/// | Remote dev without Tailscale | Cloudflare Tunnel or WireGuard | wss://tunnel.example.com/ws |
+/// | Corporate network blocks Tailscale | WireGuard or direct VPN | ws://10.x.x.x:18789 |
+///
+/// To switch: change `BEECHAT_GATEWAY_URL` env var in Xcode scheme, or update gateway-config.json.
 public struct GatewayConfigLoader: Sendable {
     public struct Config: Sendable {
         public let url: String
@@ -53,7 +69,7 @@ public struct GatewayConfigLoader: Sendable {
                    let auth = gw["auth"] as? [String: Any],
                    let token = auth["token"] as? String {
                     let mode = gw["mode"] as? String ?? "local"
-                    let url = "ws://127.0.0.1:18789"
+                    let url = "wss://openclaws-mac-mini-1.tail3f2df8.ts.net/ws"
                     print("[GatewayConfigLoader] Using OpenClaw config from \(configPath.path), mode=\(mode), url=\(url)")
                     return Config(url: url, token: token, clientMode: "ui")
                 }

@@ -11,7 +11,7 @@ public struct BeeChatMobileConfig: Sendable {
 
     public init(
         dbPath: String? = nil,
-        gatewayURL: String = "ws://127.0.0.1:18789",
+        gatewayURL: String = "wss://openclaws-mac-mini-1.tail3f2df8.ts.net/ws",
         historyFetchLimit: Int = 200,
         reconnectDebounceSeconds: Double = 1.0
     ) {
