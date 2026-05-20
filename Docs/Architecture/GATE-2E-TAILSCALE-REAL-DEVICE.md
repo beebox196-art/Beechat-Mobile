@@ -1,9 +1,10 @@
 # Gate 2E: Tailscale + Real Device Baseline
 
-**Status:** 🟡 SPEC DRAFT — Awaiting Adam approval  
+**Status:** 🟡 IN PROGRESS — Tailscale Serve verified, code updated, awaiting real device test  
 **Author:** Bee  
 **Date:** 2026-05-20  
-**Depends on:** Gate 2D (or current working state — simulator-verified hotfix #2)  
+**Updated:** 2026-05-20  
+**Depends on:** Gate 2C ✅ (simulator-verified, send/receive working)  
 **Blocks:** Gate 3 (backgrounding, reconnect — needs real device)
 
 ---
@@ -34,12 +35,12 @@ Tailscale is a development convenience, not an architectural dependency. If any 
 
 ## Exit Criteria
 
-1. **Tailscale installed and connected** on Mac mini (server) and iPhone (client)
-2. **Configurable server URL** — app connects to Tailscale IP (`ws://100.x.x.x:18789`) instead of `localhost`
+1. ~~**Tailscale installed and connected** on Mac mini (server) and iPhone (client)~~ ✅ Done
+2. ~~**Configurable server URL** — app connects to Tailscale Serve URL (`wss://openclaws-mac-mini-1.tail3f2df8.ts.net/ws`) instead of `localhost`~~ ✅ Done
 3. **Real device deployment** — app runs on physical iPhone via Xcode USB
 4. **Basic send/receive works** on real device over Tailscale
-5. **Swap-out documented** — one-page guide for replacing Tailscale with alternative networking
-6. **No code changes needed** to switch between localhost / Tailscale IP / any other URL
+5. ~~**Swap-out documented** — one-page guide for replacing Tailscale with alternative networking~~ ✅ Done (in code + this doc)
+6. ~~**No code changes needed** to switch between localhost / Tailscale URL / any other URL~~ ✅ Done (env var / config file / hardcoded fallback)
 
 ---
 
@@ -52,18 +53,33 @@ The app already has a layered config resolution system. Tailscale fits into this
 ```
 1. Environment variable BEECHAT_GATEWAY_URL  (Xcode scheme injection)
 2. Config file gateway-config.json           (app container)
-3. Hardcoded fallback                        (ws://127.0.0.1:18789)
+3. Hardcoded fallback                        (wss://openclaws-mac-mini-1.tail3f2df8.ts.net/ws)
 ```
 
-### How Tailscale Works Here
+### How Tailscale Serve Works
+
+Tailscale Serve provides an **HTTPS reverse proxy** from the tailnet to the local gateway:
+- Gateway stays bound to `localhost:18789` (loopback only — secure)
+- Tailscale Serve proxies `https://openclaws-mac-mini-1.tail3f2df8.ts.net/` → `http://127.0.0.1:18789`
+- iOS connects via `wss://openclaws-mac-mini-1.tail3f2df8.ts.net/ws?token=...`
+- Automatic HTTPS + TLS (Tailscale manages certificates)
+- Only accessible from devices on our tailnet
+
+This is better than direct tailnet bind (`gateway.bind = "tailnet"`) because:
+- Gateway stays on loopback (safer)
+- Automatic HTTPS/TLS (no plain WebSocket over the internet)
+- Tailscale identity headers available for auth (future)
+- Loopback access from Mac still works
+
+### How to Switch URLs
 
 | Method | How to Switch to Tailscale | How to Switch Away |
 |--------|---------------------------|-------------------|
-| **Env var** (recommended for dev) | Set `BEECHAT_GATEWAY_URL=ws://100.x.x.x:18789` in Xcode scheme | Remove env var, app falls back to config file |
+| **Env var** (recommended for dev) | Set `BEECHAT_GATEWAY_URL=wss://openclaws-mac-mini-1.tail3f2df8.ts.net/ws` in Xcode scheme | Remove env var, app falls back to config file |
 | **Config file** | Write `gateway-config.json` with Tailscale URL | Edit file to new URL, or delete it |
-| **Hardcoded** | Change `BeeChatMobileConfig` default (not recommended for dev) | Change it back |
+| **Hardcoded** | Change `BeeChatMobileConfig` default | Change it back |
 
-**Recommended dev setup:** Xcode scheme environment variable. Easy to toggle between simulator (localhost) and real device (Tailscale IP) without touching files.
+**Tip for simulator testing:** To test on simulator with localhost, set env var `BEECHAT_GATEWAY_URL=ws://127.0.0.1:18789` in the Xcode scheme. This overrides the default Tailscale URL.
 
 ### What Tailscale Is NOT
 
@@ -75,39 +91,43 @@ The app already has a layered config resolution system. Tailscale fits into this
 
 ## Implementation Steps
 
-### Step 1: Tailscale Setup (manual, Adam done)
+### Step 1: Tailscale Setup ✅
 - [x] Install Tailscale on Mac mini
 - [x] Install Tailscale on iPhone
-- [ ] Verify both devices show "Connected" in Tailscale admin console
-- [ ] Note Mac mini's Tailscale IP (100.x.x.x)
+- [x] Verify both devices show "Connected" in Tailscale admin console
+- [x] Mac mini Tailscale IP: `100.102.64.30`, iPhone: `100.102.202.102`
 
-### Step 2: Gateway Accessibility
-- [ ] Confirm BeeChat-v5 gateway is accessible at `ws://100.x.x.x:18789` from iPhone
-- [ ] Confirm WebSocket connection works (use Safari websocket test or similar)
-- [ ] Document Mac mini Tailscale IP in project notes
+### Step 2: Tailscale Serve Configuration ✅
+- [x] Enable Tailscale Serve in admin console (Adam action)
+- [x] Configure OpenClaw gateway: `gateway.tailscale.mode = "serve"` (already set)
+- [x] Gateway bind stays as `loopback` (Tailscale Serve proxies to localhost:18789)
+- [x] Verify: `tailscale serve status` → `https://openclaws-mac-mini-1.tail3f2df8.ts.net/ → http://127.0.0.1:18789`
+- [x] Verify: WebSocket handshake via Tailscale Serve returns `connect.challenge` ✅
+- [x] Verify: HTTPS health endpoint returns `{"ok":true}` ✅
 
-### Step 3: Real Device Deployment
+### Step 3: Code Update — Gateway URL ✅
+- [x] `BeeChatMobileConfig.swift` default changed: `ws://127.0.0.1:18789` → `wss://openclaws-mac-mini-1.tail3f2df8.ts.net/ws`
+- [x] `GatewayConfigLoader.swift` OpenClaw config fallback URL updated to Tailscale Serve URL
+- [x] Swap-out architecture documentation added to `GatewayConfigLoader.swift` doc comments
+- [x] Build compiles clean on iOS Simulator target (warnings only, no errors)
+- [x] Committed and pushed: `a8cd3e0`
+
+### Step 4: Real Device Deployment ⏳
 - [ ] Apple Developer account (free tier works for 7-day signing)
 - [ ] Xcode project configured for real device deployment
 - [ ] Build & run on iPhone via USB
 - [ ] App launches, shows topic list (even if empty/offline initially)
 
-### Step 4: Configurable Server URL
-- [ ] Xcode scheme environment variable: `BEECHAT_GATEWAY_URL=ws://100.x.x.x:18789`
-- [ ] OR: `gateway-config.json` seeded on device with Tailscale URL
-- [ ] Verify app connects to gateway on real device
-- [ ] Verify connection status shows 🟢 Online
-
-### Step 5: Functional Verification on Real Device
+### Step 5: Functional Verification on Real Device ⏳
 - [ ] Topic list loads from gateway
 - [ ] Send message → appears immediately in chat (hotfix #2)
 - [ ] Bee's response streams back correctly
 - [ ] Message order correct (oldest top, newest bottom)
 - [ ] Mic button shows privacy prompt (no crash — hotfix #1)
 
-### Step 6: Documentation
+### Step 6: Documentation ⏳
 - [ ] Update STATUS.md with Gate 2E completion
-- [ ] Write swap-out guide (this document, Section: "Rolling Out of Tailscale")
+- [ ] Tag repo when Gate 2E passes
 
 ---
 
@@ -116,21 +136,22 @@ The app already has a layered config resolution system. Tailscale fits into this
 If you need to stop using Tailscale, here's how:
 
 ### Option A: Direct LAN IP (simplest, home/office only)
-1. Note your Mac mini's LAN IP (e.g. `192.168.1.x`)
-2. Change `BEECHAT_GATEWAY_URL` to `ws://192.168.1.x:18789`
-3. Limitation: only works on the same network
+1. Change `gateway.bind` from `"loopback"` to `"tailnet"` or `"all"` in OpenClaw config
+2. Note your Mac mini's LAN IP (e.g. `192.168.1.x`)
+3. Change `BEECHAT_GATEWAY_URL` to `ws://192.168.1.x:18789`
+4. Limitation: only works on the same network, no TLS
 
 ### Option B: Cloudflare Tunnel (production-grade, free tier available)
 1. Install `cloudflared` on Mac mini
-2. `cloudflared tunnel --url ws://localhost:18789`
+2. `cloudflared tunnel --url http://localhost:18789`
 3. Get a `https://xxx.trycloudflare.com` URL
-4. Change `BEECHAT_GATEWAY_URL` to `wss://xxx.trycloudflare.com`
+4. Change `BEECHAT_GATEWAY_URL` to `wss://xxx.trycloudflare.com/ws`
 5. Advantage: works from any network, no Tailscale needed on client
 
 ### Option C: Public Server (for distribution)
 1. Deploy BeeChat-v5 to a VPS or cloud server
 2. Point DNS at it (e.g. `beechat.yourdomain.com`)
-3. Change `BEECHAT_GATEWAY_URL` to `wss://beechat.yourdomain.com`
+3. Change `BEECHAT_GATEWAY_URL` to `wss://beechat.yourdomain.com/ws`
 4. Add SSL/TLS termination (Let's Encrypt or similar)
 
 ### Option D: Custom VPN (WireGuard, etc.)
@@ -159,8 +180,8 @@ If you need to stop using Tailscale, here's how:
 | Tailscale free tier limits change | Low — app doesn't depend on Tailscale SDK | Swap URL to alternative (see above) |
 | iOS kills WebSocket in background | Expected — this is Gate 3 territory | Not a 2E blocker; documented for next gate |
 | Apple Developer account needed for real device | Low — free account works for 7-day windows | Use free account for dev; paid account ($99/yr) for TestFlight later |
-| Tailscale IP changes | Very low — Tailscale IPs are stable per device | Can also use Tailscale MagicDNS (`hostname.tailnet`) |
-| Config file seeding on device | Medium — need to get config onto real device | Xcode scheme env vars easiest for dev; file-based for later |
+| Tailscale Serve URL changes | Very low — Tailscale MagicDNS names are stable per tailnet | Update hardcoded default + any config files |
+| Config file seeding on device | Medium — need to get config onto real device | Use Xcode scheme env vars for dev; gateway-config.json for later |
 
 ---
 
