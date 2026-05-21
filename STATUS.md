@@ -153,16 +153,16 @@
 - [ ] Stalled streaming cleaned up
 - [ ] Delivery ledger transitions correctly
 
-#### Gate 2E: Tailscale + Real Device Baseline 🟡 SPEC DRAFT
+#### Gate 2E: Tailscale + Real Device Baseline ✅ VERIFIED ON REAL DEVICE
 **Goal:** Run BeeChat Mobile on real iPhone over Tailscale, with swap-out architecture for future networking changes.
 **Spec:** [GATE-2E-TAILSCALE-REAL-DEVICE.md](Docs/Architecture/GATE-2E-TAILSCALE-REAL-DEVICE.md)
 **Why:** Simulator+localhost works, but real device testing requires real networking. Tailscale gives us stable, encrypted connectivity from day one on real hardware — no code dependency.
-- [ ] Tailscale installed and connected on Mac mini + iPhone
-- [ ] Gateway accessible at Tailscale IP from iPhone
-- [ ] Configurable server URL (env var or config file — one value change)
-- [ ] App builds and runs on real iPhone via Xcode USB
-- [ ] Basic send/receive works on real device over Tailscale
-- [ ] Swap-out guide documented (Tailscale → alternative: one URL change)
+- [x] Tailscale installed and connected on Mac mini + iPhone
+- [x] Gateway accessible at Tailscale IP from iPhone
+- [x] Configurable server URL (env var or config file — one value change)
+- [x] App builds and runs on real iPhone via Xcode USB
+- [x] Basic send/receive works on real device over Tailscale
+- [x] Swap-out guide documented (Tailscale → alternative: one URL change)
 
 **Swap-out principle:** Tailscale is a development convenience, not a dependency. The app connects to a URL. Tailscale makes that URL reachable. Changing the URL is a config change, not a code refactor. Options: LAN IP, Cloudflare Tunnel, public server, WireGuard VPN.
 
@@ -211,7 +211,7 @@ See [ADR-002](Docs/Decisions/ADR-002-team-driven-development.md) for full detail
 **Bee orchestrates only — never implements code.**
 
 ## Active Blockers
-- None currently — Gate 2C functionally complete, Gate 2E spec awaiting approval
+- None currently — Gate 2E verified on real device, Gate 2B.5 ready for implementation
 
 ## Gate 2B.5 Phase 1 v3 Spec
 - **Current:** [GATE-2B5-PHASE1-DATA-LAYER-v3.md](Docs/Architecture/GATE-2B5-PHASE1-DATA-LAYER-v3.md)
@@ -248,14 +248,10 @@ See [ADR-002](Docs/Decisions/ADR-002-team-driven-development.md) for full detail
 - **Previous:** 9fa641e — fix(gateway): add deviceFamily to ClientInfo for iOS
 
 ## Next Steps
-1. Adam approval of Gate 2E spec (Tailscale + Real Device)
-2. Verify Tailscale connectivity between Mac mini and iPhone
-3. Configure gateway URL for Tailscale IP
-4. Deploy to real iPhone via Xcode USB
-5. Functional verification on real device (send/receive/message order/no crash)
-6. Continue Gate 2B.5 Phase 1 implementation (Q)
-7. Gate 2D (Reconnect & Reconciliation) — much more meaningful on real device
-8. Gate 3 (Mobile UX Shell) — backgrounding, navigation
+1. Gate 2B.5 Phase 1 implementation (Q) — spec approved, ready to build
+2. Gate 2D (Reconnect & Reconciliation) — much more meaningful on real device
+3. Gate 3 (Mobile UX Shell) — backgrounding, navigation
+4. Real-device crash monitoring as usage increases
 
 ## Context Notes
 - **Parent project:** BeeChat v5 (macOS) — shares Core Swift packages via SPM local dependency
