@@ -84,9 +84,22 @@ public struct GatewayConfigLoader: Sendable {
             }
         }
 
-        // 3. No config found - offline mode
-        NSLog("[GatewayConfigLoader] No gateway config found at %@ - offline mode", configPath.path)
-        return nil
+        // 3. Bundled config (gateway-config.json in app bundle)
+        if let bundleURL = Bundle.main.url(forResource: "gateway-config", withExtension: "json"),
+           let data = try? Data(contentsOf: bundleURL),
+           let config = try? JSONDecoder().decode(GatewayFileConfig.self, from: data) {
+            NSLog("[GatewayConfigLoader] Using bundled config: url=%@", config.url)
+            return Config(url: config.url, token: config.token, clientMode: config.clientMode ?? "ui")
+        }
+
+        // 4. Hardcoded fallback (Tailscale Serve on tailnet)
+        // This ensures the app works out-of-the-box on any device connected to the tailnet.
+        // To override: set BEECHAT_GATEWAY_URL env var in Xcode scheme, or place
+        // gateway-config.json in Application Support/BeeChat/
+        let fallbackURL = "wss://openclaws-mac-mini-1.tail3f2df8.ts.net/ws"
+        let fallbackToken = ProcessInfo.processInfo.environment["BEECHAT_GATEWAY_TOKEN"] ?? "e6773dda5610c16ec9896fe0c5140690c01d31408115d360"
+        NSLog("[GatewayConfigLoader] Using hardcoded fallback: url=%@", fallbackURL)
+        return Config(url: fallbackURL, token: fallbackToken)
     }
 }
 

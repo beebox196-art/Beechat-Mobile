@@ -42,6 +42,9 @@ targets:
     deploymentTarget: "17.0"
     sources:
       - Sources/App
+    resources:
+      - Sources/App/gateway-config.json
+      - Sources/App/Assets.xcassets
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: "com.ambox.beechatmobile"
@@ -50,6 +53,9 @@ targets:
         INFOPLIST_KEY_NSMicrophoneUsageDescription: "BeeChat uses the microphone for voice dictation of messages."
         INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "BeeChat uses the photo library to select photos for messages."
         SWIFT_VERSION: "5.0"
+        CODE_SIGN_IDENTITY: "iPhone Developer"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: G7K4WQ8TPU
     dependencies:
       - target: BeeChatMobileKit
       - target: BeeChatUI
