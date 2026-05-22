@@ -114,12 +114,19 @@
 - [x] Kieran adversarial review: PASS (2 blockers fixed)
 - [x] Merged to main, tagged `gate-2f-phase0`
 
-#### Phase 1: Mac-Side Publishing 📋 NEXT
-- [ ] `sessionsPatch` + `sessionsPluginPatch` RPC wrappers
-- [ ] `publishTopicState` + `clearTopicState` on SyncBridge
-- [ ] `reconcileAllTopicState()` on reconnect
-- [ ] CRUD hooks: create, archive, save, delete
-- [ ] Verify `operator.admin` scope on Mac client
+#### Phase 1: Mac-Side Publishing ✅ COMPLETE
+- [x] Adam approval of v3 spec
+- [x] `sessionsPatch` + `sessionsPluginPatch` RPC wrappers
+- [x] `publishTopicState` + `clearTopicState` + `reconcileAllTopicState` on SyncBridge
+- [x] `TopicPublishQueue` serial publish queue
+- [x] CRUD hooks: create, delete (archive/save UI not yet in Mac app — methods ready)
+- [x] Scope verification on startup
+- [x] Pre-step: `mode: "webchat"` → `"ui"` fix in AppRootView
+- [x] Build clean, all 102 tests pass
+- [x] Branch pushed: `feature/gate-2f-phase1`
+**Spec (v3, team-approved):** [GATE-2F-PHASE1-MAC-PUBLISHING-v3.md](Docs/Architecture/GATE-2F-PHASE1-MAC-PUBLISHING-v3.md)
+**Consolidated review:** [GATE-2F-PHASE1-CONSOLIDATED-v3.md](Docs/Architecture/GATE-2F-PHASE1-CONSOLIDATED-v3.md)
+**Reviewer reports:** [Q](Docs/Architecture/GATE-2F-PHASE1-Q-REVIEW.md), [Kieran](Docs/Architecture/GATE-2F-PHASE1-KIERAN-REVIEW.md), [Mel](Docs/Architecture/GATE-2F-PHASE1-MEL-REVIEW.md)
 
 #### Phase 2: iPhone Topic Derivation 📋 TODO
 #### Phase 3: Cleanup & Validation 📋 TODO
