@@ -91,9 +91,11 @@
 
 **Spec:** [GATE-2E-TAILSCALE-REAL-DEVICE.md](Docs/Architecture/GATE-2E-TAILSCALE-REAL-DEVICE.md)
 
-### Gate 2F: Cross-Device Topic Sync 📋 SPEC IN PROGRESS
+### Gate 2F: Cross-Device Topic Sync 🔄 PHASE 0 COMPLETE, PHASE 1 NEXT
 **Goal:** Mac is the master topic source. iPhone sees the same topics as Mac (like Telegram). No bidirectional sync needed — iPhone is conversations on the go.
-**Status:** Gav researching simplest viable approach + gateway capabilities
+**Spec (v2, team-approved):** [GATE-2F-CROSS-DEVICE-TOPIC-SYNC-v2.md](Docs/Architecture/GATE-2F-CROSS-DEVICE-TOPIC-SYNC-v2.md)
+**ADR:** [ADR-003-cross-device-topic-sync.md](Docs/Decisions/ADR-003-cross-device-topic-sync.md)
+**Reviews:** [Q](Docs/Architecture/GATE-2F-V1-Q-REVIEW.md), [Kieran](Docs/Architecture/GATE-2F-V1-KIERAN-REVIEW.md), [Mel](Docs/Architecture/GATE-2F-V1-MEL-REVIEW.md), [Consolidated](Docs/Architecture/GATE-2F-V1-CONSOLIDATED-REVIEW.md)
 
 **Design constraints (Adam, May 22):**
 - Mac is master — topic definitions flow Mac → iPhone only
@@ -103,7 +105,24 @@
 - Simple, stable, unbreakable
 - Standard patterns — minimal invention, reuse existing
 
-**Research in progress:** Gateway API audit, existing sync patterns, simplest viable architecture
+**Architecture:** Gateway is truth, iPhone is cache. `sessions.pluginPatch` for metadata, `sessions.patch` for labels, `sessions.list` for reads, `sessions.changed` for push. No new gateway endpoints.
+
+#### Phase 0: Shared Package Prerequisite ✅ COMPLETE
+- [x] `SessionInfo` decodes `pluginExtensions` from `sessions.list` response (backwards compatible)
+- [x] `BeeChatTopicMetadata` typed struct with direct extraction (no AnyCodable round-trip)
+- [x] 17 unit tests (including malformed-data tests)
+- [x] Kieran adversarial review: PASS (2 blockers fixed)
+- [x] Merged to main, tagged `gate-2f-phase0`
+
+#### Phase 1: Mac-Side Publishing 📋 NEXT
+- [ ] `sessionsPatch` + `sessionsPluginPatch` RPC wrappers
+- [ ] `publishTopicState` + `clearTopicState` on SyncBridge
+- [ ] `reconcileAllTopicState()` on reconnect
+- [ ] CRUD hooks: create, archive, save, delete
+- [ ] Verify `operator.admin` scope on Mac client
+
+#### Phase 2: iPhone Topic Derivation 📋 TODO
+#### Phase 3: Cleanup & Validation 📋 TODO
 
 ### Gate 3: Mobile UX Shell 📋 TODO
 **Goal:** Navigation, mobile lifecycle, backgrounding.
