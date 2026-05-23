@@ -13,12 +13,12 @@ public struct TopicListView: View {
     @State private var isShowingImportSheet = false
     @State private var importCandidates: [Session] = []
     @State private var selectedImportIds: Set<String> = []
-    @State private var isLoadingCandidates = false
+    private(set) var isLoadingCandidates = false
     @State private var importCandidateCount: Int = 0
 
     // Archive undo — Task-based (not DispatchQueue)
     @State private var archivedTopic: Topic? = nil
-    @State private var showArchiveUndo = false
+    @State private var showArchiveToast = false
     @State private var archiveUndoTask: Task<Void, Never>? = nil
 
     // Delete confirmation
@@ -26,6 +26,10 @@ public struct TopicListView: View {
 
     // Loading state for import candidate count
     @State private var isLoadingCandidateCount = false
+
+    // Phase 2: First-run onboarding
+    @AppStorage("beechatOnboardingShown") private var onboardingShown = false
+    @State private var showOnboarding = false
 
     // Accessibility
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -39,7 +43,7 @@ public struct TopicListView: View {
     public var body: some View {
         NavigationSplitView {
             VStack(spacing: 0) {
-                // Offline banner when disconnected
+                // Offline banner when disconnected/error (Mel: banner owns disconnected state)
                 if viewModel.connectionState == .disconnected || viewModel.connectionState == .error {
                     OfflineBannerView(onRetry: {
                         Task { await viewModel.reconnect() }
@@ -47,19 +51,9 @@ public struct TopicListView: View {
                 }
 
                 if viewModel.topics.isEmpty {
-                    // Empty state (M9)
-                    EmptyTopicsView(
-                        hasImportableSessions: importCandidateCount > 0,
-                        isLoading: isLoadingCandidateCount,
-                        showArchiveToast: showArchiveUndo,
-                        onStartConversation: { isShowingNewTopicSheet = true },
-                        onImportSessions: importCandidateCount > 0 ? {
-                            Task {
-                                await loadImportCandidates()
-                                isShowingImportSheet = true
-                            }
-                        } : nil
-                    )
+                    // Phase 2 Step 14: Empty state variants
+                    emptyStateView()
+                        .transition(.opacity)
                 } else {
                     // Topic list with swipe actions
                     List(viewModel.topics, id: \.id, selection: Binding(
@@ -152,16 +146,22 @@ public struct TopicListView: View {
             Button("Cancel", role: .cancel) { topicToDelete = nil }
             Button("Delete", role: .destructive) {
                 if let topic = topicToDelete {
-                    try? viewModel.deleteTopic(id: topic.id)
+                    Task {
+                        try? await viewModel.deleteTopic(id: topic.id)
+                    }
                     topicToDelete = nil
                 }
             }
         } message: {
             Text("This deletes this conversation and all its messages from BeeChat. This cannot be undone.")
         }
-        // Archive undo toast — overlay (B3 fix: Task-based, VoiceOver-safe)
+        // Phase 2 Step 13: Sync footer — hidden during toast + offline banner (Mel UX notes)
+        .safeAreaInset(edge: .bottom) {
+            syncFooterView()
+        }
+        // Archive undo toast — overlay (Mel: toast wins, footer hidden)
         .overlay(alignment: .bottom) {
-            if showArchiveUndo, let topic = archivedTopic {
+            if showArchiveToast, let topic = archivedTopic {
                 archiveUndoToast(topic: topic)
                     .transition(reduceMotion
                         ? .opacity
@@ -174,6 +174,12 @@ public struct TopicListView: View {
                 Task { await refreshImportCandidateCount() }
             } else {
                 importCandidateCount = 0
+            }
+        }
+        // Phase 2 Step 14: Show first-run onboarding once
+        .onAppear {
+            if !onboardingShown && viewModel.topics.isEmpty {
+                showOnboarding = true
             }
         }
         // Import sheet
@@ -194,6 +200,104 @@ public struct TopicListView: View {
         .onDisappear {
             archiveUndoTask?.cancel()
         }
+        // First-run onboarding sheet
+        .alert("Welcome to BeeChat", isPresented: $showOnboarding) {
+            Button("Got it") {
+                onboardingShown = true
+            }
+        } message: {
+            Text("Topics from your Mac appear here automatically. Create topics on either device — they'll stay in sync.")
+        }
+    }
+
+    // MARK: - Empty State Variants (Step 14)
+
+    @ViewBuilder
+    private func emptyStateView() -> some View {
+        if !onboardingShown {
+            // First run, no cache
+            EmptyTopicsView(
+                state: .firstRunNoCache,
+                onStartConversation: { isShowingNewTopicSheet = true },
+                onImportSessions: importCandidateCount > 0 ? {
+                    Task {
+                        await loadImportCandidates()
+                        isShowingImportSheet = true
+                    }
+                } : nil,
+                onReconnect: { Task { await viewModel.reconnect() } },
+                hasImportableSessions: importCandidateCount > 0,
+                isLoadingCandidates: isLoadingCandidateCount
+            )
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Welcome to BeeChat. Topics from your Mac will appear here automatically.")
+        } else if viewModel.connectionState == .disconnected || viewModel.connectionState == .error {
+            // Disconnected, no cache
+            EmptyTopicsView(
+                state: .disconnectedNoCache,
+                onStartConversation: { isShowingNewTopicSheet = true },
+                onImportSessions: nil,
+                onReconnect: { Task { await viewModel.reconnect() } },
+                hasImportableSessions: false,
+                isLoadingCandidates: false
+            )
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Cannot reach gateway. Connect to the gateway to load topics.")
+        } else {
+            // Syncing, no cache or connected, no topics
+            EmptyTopicsView(
+                state: .syncingNoCache,
+                onStartConversation: { isShowingNewTopicSheet = true },
+                onImportSessions: nil,
+                onReconnect: { Task { await viewModel.reconnect() } },
+                hasImportableSessions: importCandidateCount > 0,
+                isLoadingCandidates: isLoadingCandidateCount
+            )
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Loading topics. Connecting to your Mac.")
+        }
+    }
+
+    // MARK: - Sync Footer (Step 13 — Mel UX notes)
+
+    @ViewBuilder
+    private func syncFooterView() -> some View {
+        // Mel: Footer hidden during toast + offline banner
+        if showArchiveToast { return AnyView(EmptyView()) }
+        if viewModel.connectionState == .disconnected || viewModel.connectionState == .error {
+            return AnyView(EmptyView())
+        }
+        // Show footer for actionable states: syncing, stale, sync unavailable
+        guard viewModel.syncState.isStale ||
+              case .syncing = viewModel.syncState ||
+              case .syncUnavailable = viewModel.syncState else {
+            return AnyView(EmptyView())
+        }
+
+        return AnyView(
+            VStack(spacing: 4) {
+                Divider()
+                HStack(spacing: 6) {
+                    Image(systemName: viewModel.syncState.symbol)
+                        .font(.caption)
+                        .foregroundStyle(Color(viewModel.syncState.colorAccentName))
+                        .accessibilityHidden(true)
+                    Text(viewModel.syncState.label)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if viewModel.syncState.isStale {
+                        Button("Sync Now") {
+                            Task { await viewModel.refreshTopicsFromGateway() }
+                        }
+                        .font(.caption)
+                        .accessibilityLabel("Sync topics now")
+                        .accessibilityHint("Refreshes topics from the gateway.")
+                    }
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 4)
+            }
+        )
     }
 
     // MARK: - Archive Undo Toast (Task-based, VoiceOver-safe)
@@ -221,17 +325,14 @@ public struct TopicListView: View {
     // MARK: - Actions
 
     private func archiveTopic(_ topic: Topic) {
-        // Cancel any existing undo timer (handles re-archive)
         archiveUndoTask?.cancel()
 
-        do {
-            _ = try viewModel.archiveTopic(id: topic.id)
-            archivedTopic = topic
+        if let archived = try? viewModel.archiveTopic(id: topic.id) {
+            archivedTopic = archived
             withAnimation(reduceMotion ? .none : .easeInOut) {
-                showArchiveUndo = true
+                showArchiveToast = true
             }
 
-            // VoiceOver-safe timeout: if VoiceOver running, don't auto-dismiss
             let timeout: TimeInterval = isVoiceOverEnabled ? 30 : 7
 
             archiveUndoTask = Task {
@@ -239,13 +340,11 @@ public struct TopicListView: View {
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
                     withAnimation(reduceMotion ? .none : .easeInOut) {
-                        showArchiveUndo = false
+                        showArchiveToast = false
                     }
                     archivedTopic = nil
                 }
             }
-        } catch {
-            viewModel.connectionError = error.localizedDescription
         }
     }
 
@@ -255,7 +354,7 @@ public struct TopicListView: View {
         do {
             try viewModel.unarchiveTopic(id: topic.id)
             withAnimation(reduceMotion ? .none : .easeInOut) {
-                showArchiveUndo = false
+                showArchiveToast = false
             }
             archivedTopic = nil
         } catch {

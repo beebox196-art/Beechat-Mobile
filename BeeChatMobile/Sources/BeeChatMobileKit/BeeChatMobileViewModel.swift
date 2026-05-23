@@ -3,6 +3,53 @@ import BeeChatPersistence
 import BeeChatGateway
 import BeeChatSyncBridge
 
+// MARK: - SyncState (Step 13)
+
+public enum SyncState: Equatable, Sendable {
+    case synced(lastSync: Date)
+    case syncing
+    case disconnected
+    case syncUnavailable(String)
+}
+
+extension SyncState {
+    var symbol: String {
+        switch self {
+        case .synced: return "checkmark.icloud.fill"
+        case .syncing: return "arrow.triangle.2.circlepath"
+        case .disconnected: return "exclamationmark.icloud.fill"
+        case .syncUnavailable: return "info.circle.fill"
+        }
+    }
+    var colorAccentName: String {
+        switch self {
+        case .synced(let lastSync):
+            return Date().timeIntervalSince(lastSync) < 300 ? "secondary" : "orange"
+        case .syncing: return "blue"
+        case .disconnected: return "red"
+        case .syncUnavailable: return "secondary"
+        }
+    }
+    var label: String {
+        switch self {
+        case .synced(let lastSync):
+            let interval = Date().timeIntervalSince(lastSync)
+            if interval < 60 { return "Synced just now" }
+            let minutes = Int(interval / 60)
+            return "Synced \(minutes)m ago"
+        case .syncing: return "Syncing..."
+        case .disconnected: return "Gateway disconnected"
+        case .syncUnavailable(let reason): return reason
+        }
+    }
+    var isStale: Bool {
+        guard case .synced(let lastSync) = self else { return false }
+        return Date().timeIntervalSince(lastSync) > 300
+    }
+}
+
+// MARK: - ViewModel
+
 /// ViewModel owns SyncBridge lifecycle, persists sessions/messages, and maps to Exyte types.
 @Observable
 @MainActor
@@ -19,6 +66,9 @@ public final class BeeChatMobileViewModel {
     /// Per-topic streaming content for live UI updates
     public var streamingContent: [String: String] = [:]
 
+    /// Phase 2: Sync state for topic sync indicator
+    public var syncState: SyncState = .disconnected
+
     public let config: BeeChatMobileConfig
     public let persistenceStore: BeeChatPersistenceStore
 
@@ -28,6 +78,10 @@ public final class BeeChatMobileViewModel {
     private var streamingPollTask: Task<Void, Never>?
     private var connectionWatchTask: Task<Void, Never>?
     private var messageObservationTask: Task<Void, Never>?
+
+    // Phase 2: Debounce for sessions.changed
+    private var lastSessionsChangedSync: Date = .distantPast
+    private var hasAdminScope: Bool = false
 
     public init(config: BeeChatMobileConfig) {
         self.config = config
@@ -48,7 +102,7 @@ public final class BeeChatMobileViewModel {
         }
 
         // Load initial topics from local DB
-        self.topics = try persistenceStore.topicRepo.fetchAllActiveWithCounts()
+        self.topics = try persistenceStore.fetchAllActiveWithCounts()
 
         // Auto-select first topic
         if selectedTopicId == nil, let first = topics.first {
@@ -57,6 +111,7 @@ public final class BeeChatMobileViewModel {
     }
 
     /// Connect to the live gateway. Call after `start()`.
+    /// Phase 2: consume gateway metadata via beechatMetadata.
     public func connect() async {
         guard syncBridge == nil else { return }
 
@@ -66,6 +121,7 @@ public final class BeeChatMobileViewModel {
             NSLog("[BeeChat] GatewayConfigLoader returned nil - no config found")
             connectionState = .error
             connectionError = "No gateway config found. Check ~/.openclaw/openclaw.json"
+            syncState = .disconnected
             return
         }
 
@@ -108,6 +164,34 @@ public final class BeeChatMobileViewModel {
         do {
             try await bridge.start()
 
+            // Phase 2 Step 7: Fetch raw SessionInfo (preserves pluginExtensions)
+            let sessionInfos = try await bridge.fetchSessionInfos()
+
+            // Filter to sessions with BeeChat metadata
+            let knownTopics = sessionInfos.compactMap { info -> (GatewaySessionInfo, BeeChatTopicMetadata)? in
+                guard let metadata = info.beechatMetadata else { return nil }
+                return (info.asGatewaySessionInfo, metadata)
+            }
+
+            // Upsert local topics from gateway truth
+            try persistenceStore.upsertTopicsFromGateway(knownTopics)
+
+            // Refresh topic list
+            self.topics = try persistenceStore.fetchAllActiveWithCounts()
+
+            // Auto-select first topic
+            if self.selectedTopicId == nil, let first = topics.first {
+                self.selectedTopicId = first.id
+            }
+
+            // Check admin scope for sync capability
+            self.hasAdminScope = await bridge.hasAdminScope()
+            if !self.hasAdminScope {
+                self.syncState = .syncUnavailable("Topic sync requires admin scope")
+            } else {
+                self.syncState = .synced(lastSync: Date())
+            }
+
             // 1. Reconcile pending offline topics
             let pendingTopics = try persistenceStore.topicRepo.fetchPendingSyncTopics()
             for topic in pendingTopics {
@@ -120,53 +204,38 @@ public final class BeeChatMobileViewModel {
                 }
             }
 
-            // 2. Fetch sessions from gateway
-            let sessions = try await bridge.fetchSessions()
-
-            // 3. Filter to only BeeChat sessions (using injected repo)
-            let beeChatSessions = sessions.filter { session in
-                (try? BeeChatSessionFilter.isBeeChatSession(session.id, topicRepo: persistenceStore.topicRepo)) == true
-            }
-
-            // 4. Create topics for new gateway sessions without a topic
-            for gatewaySession in beeChatSessions {
-                if try persistenceStore.topicRepo.resolveTopicId(for: gatewaySession.id) == nil {
-                    let topic = Topic(
-                        id: UUID().uuidString,
-                        name: gatewaySession.title ?? gatewaySession.customName ?? "Conversation",
-                        lastMessagePreview: gatewaySession.lastMessagePreview,
-                        lastActivityAt: gatewaySession.lastMessageAt ?? gatewaySession.updatedAt,
-                        unreadCount: gatewaySession.unreadCount,
-                        sessionKey: gatewaySession.id
-                    )
-                    try persistenceStore.topicRepo.save(topic)
-                    do {
-                        try persistenceStore.topicRepo.saveBridge(topicId: topic.id, sessionKey: gatewaySession.id)
-                    } catch {
-                        print("[ViewModel] Bridge already exists for session \(gatewaySession.id): \(error)")
-                    }
-                }
-            }
-
-            // 5. Sync metadata from BeeChat sessions to local topics
-            try persistenceStore.topicRepo.syncMetadataFromSessions(beeChatSessions)
-
-            // 6. Refresh topic list
-            self.topics = try persistenceStore.topicRepo.fetchAllActiveWithCounts()
-
-            // 7. Auto-select first topic
-            if self.selectedTopicId == nil, let first = topics.first {
-                self.selectedTopicId = first.id
-            }
-
-            // 8. Session subscription is handled by SyncBridge.start()
             startMessageObservation()
         } catch {
             connectionState = .error
             connectionError = error.localizedDescription
+            syncState = .disconnected
         }
     }
 
+    /// Phase 2 Step 12a: Light refresh — fetch session infos, upsert topics, update sync state.
+    /// Does NOT reconnect the gateway connection. Use for "Sync Now" button.
+    public func refreshTopicsFromGateway() async {
+        guard connectionState == .connected, let bridge = syncBridge else { return }
+        syncState = .syncing
+        do {
+            let sessionInfos = try await bridge.fetchSessionInfos()
+            let knownTopics = sessionInfos.compactMap { info -> (GatewaySessionInfo, BeeChatTopicMetadata)? in
+                guard let metadata = info.beechatMetadata else { return nil }
+                return (info.asGatewaySessionInfo, metadata)
+            }
+            try persistenceStore.upsertTopicsFromGateway(knownTopics)
+            self.topics = try persistenceStore.fetchAllActiveWithCounts()
+            if hasAdminScope {
+                self.syncState = .synced(lastSync: Date())
+            }
+        } catch {
+            // Refresh failed — fall back to full reconnect
+            print("[ViewModel] refreshTopicsFromGateway failed: \(error), attempting reconnect")
+            await reconnect()
+        }
+    }
+
+    /// Phase 2 Step 12: Disconnect → update syncState
     public func disconnect() async {
         streamingPollTask?.cancel()
         connectionWatchTask?.cancel()
@@ -181,6 +250,7 @@ public final class BeeChatMobileViewModel {
         }
         syncBridge = nil
         connectionState = .disconnected
+        syncState = .disconnected
     }
 
     public func reconnect() async {
@@ -202,12 +272,7 @@ public final class BeeChatMobileViewModel {
     // MARK: - Topic Management
 
     /// Create a new topic with a user-provided name.
-    /// Generates an upfront gateway-format session key and bridge entry.
-    /// If the gateway is connected, sends a bootstrap message immediately.
-    /// If offline, sets pendingGatewaySync = true for later reconciliation.
-    ///
-    /// - Parameter name: Display name (1-80 chars, trimmed)
-    /// - Returns: The created Topic
+    /// Phase 2: publish to gateway if connected + admin scope.
     public func createTopic(name: String) throws -> Topic {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -223,17 +288,10 @@ public final class BeeChatMobileViewModel {
             pendingGatewaySync: isOffline
         )
 
-        // If connected, send bootstrap immediately
-        if !isOffline, let bridge = syncBridge, let sessionKey = topic.sessionKey {
-            Task {
-                do {
-                    _ = try await bridge.sendMessage(sessionKey: sessionKey, text: "Start", topic: topic)
-                    try persistenceStore.topicRepo.markSynced(topicId: topic.id)
-                } catch {
-                    print("[ViewModel] Bootstrap send failed for \(topic.id): \(error)")
-                    // Topic stays pending — will reconcile on next connect
-                }
-            }
+        // Phase 2 Step 9: Publish to gateway if connected + admin scope
+        if !isOffline, let bridge = syncBridge, hasAdminScope, let sessionKey = topic.sessionKey {
+            let topicForPublish = try persistenceStore.fetchTopicById(topic.id)!
+            bridge.publishTopicState(topic: topicForPublish, sessionKey: sessionKey)
         }
 
         // Refresh and auto-select
@@ -242,62 +300,59 @@ public final class BeeChatMobileViewModel {
         return topic
     }
 
-    /// Archive a topic. Removes it from the active list.
-    /// Uses the existing TopicRepository.archive(topicId:) method which
-    /// performs a surgical SQL UPDATE (no stale in-memory data risk).
-    /// Returns the archived topic for undo support.
-    public func archiveTopic(id: String) throws -> Topic? {
-        // Fetch the topic before archiving (for undo)
-        guard let topic = try persistenceStore.topicRepo.fetchById(id) else { return nil }
-        guard !topic.isArchived else { return nil }
+    /// Phase 2 Step 10: Delete topic → gateway cleanup
+    public func deleteTopic(id: String) async throws {
+        guard let topic = try persistenceStore.fetchTopicById(id) else { return }
 
-        // Use the existing repo method — direct SQL UPDATE
-        try persistenceStore.topicRepo.archive(topicId: id)
+        // Gateway cleanup if connected with admin scope
+        if let bridge = syncBridge, connectionState == .connected, hasAdminScope, let sessionKey = topic.sessionKey {
+            let cleared = await bridge.clearTopicStateWithResult(sessionKey: sessionKey)
+            if !cleared {
+                connectionError = "Topic deleted locally but gateway metadata may persist."
+            }
+        }
 
-        // Refresh list
-        self.topics = try persistenceStore.topicRepo.fetchAllActiveWithCounts()
-
-        // If archived topic was selected, select the first remaining
+        try persistenceStore.deleteTopicCascading(id)
+        self.topics = try persistenceStore.fetchAllActiveWithCounts()
         if selectedTopicId == id {
             selectedTopicId = topics.first?.id
         }
+    }
 
+    /// Phase 2 Step 11: Archive topic → gateway sync
+    public func archiveTopic(id: String) throws -> Topic? {
+        guard let topic = try persistenceStore.fetchTopicById(id) else { return nil }
+        guard !topic.isArchived else { return nil }
+
+        try persistenceStore.archiveTopic(topicId: id)
+        self.topics = try persistenceStore.fetchAllActiveWithCounts()
+
+        // Publish updated state to gateway
+        if let bridge = syncBridge, connectionState == .connected, hasAdminScope, let sessionKey = topic.sessionKey {
+            bridge.publishTopicState(topic: topic, sessionKey: sessionKey)
+        }
+
+        if selectedTopicId == id { selectedTopicId = topics.first?.id }
         return topic
     }
 
-    /// Restore an archived topic. Used for undo support.
-    /// Re-selects the restored topic so the user sees it immediately.
+    /// Phase 2 Step 11: Restore archived topic → gateway sync
     public func unarchiveTopic(id: String) throws {
-        guard var topic = try persistenceStore.topicRepo.fetchById(id) else { return }
+        guard var topic = try persistenceStore.fetchTopicById(id) else { return }
         topic.isArchived = false
         topic.updatedAt = Date()
-        try persistenceStore.topicRepo.save(topic)
-        self.topics = try persistenceStore.topicRepo.fetchAllActiveWithCounts()
-
-        // Re-select the restored topic
+        try persistenceStore.saveTopic(topic)
+        self.topics = try persistenceStore.fetchAllActiveWithCounts()
         self.selectedTopicId = topic.id
-    }
 
-    /// Delete a topic and all associated data (messages, bridge entry).
-    /// This is permanent and cannot be undone.
-    /// The caller must show a confirmation dialog before calling this.
-    public func deleteTopic(id: String) throws {
-        try persistenceStore.topicRepo.deleteCascading(id)
-
-        // Refresh list
-        self.topics = try persistenceStore.topicRepo.fetchAllActiveWithCounts()
-
-        // If deleted topic was selected, select the first remaining
-        if selectedTopicId == id {
-            selectedTopicId = topics.first?.id
+        // Publish updated state to gateway
+        if let bridge = syncBridge, connectionState == .connected, hasAdminScope, let sessionKey = topic.sessionKey {
+            bridge.publishTopicState(topic: topic, sessionKey: sessionKey)
         }
     }
 
     // MARK: - Import Sessions
 
-    /// Fetch candidate sessions that could be imported as topics.
-    /// These are gateway sessions that don't already have a local topic bridge.
-    /// Filters out known system/cron session patterns.
     public func importCandidates() async throws -> [Session] {
         guard let bridge = syncBridge else {
             throw TopicError.gatewayNotConnected
@@ -306,12 +361,10 @@ public final class BeeChatMobileViewModel {
         let sessions = try await bridge.fetchSessions()
         let existingKeys = try persistenceStore.topicRepo.fetchAllActiveSessionKeys()
 
-        // Filter to sessions that don't already have a bridge entry
         let candidates = sessions.filter { session in
             !existingKeys.contains(session.id)
         }
 
-        // Filter out known system/cron/agent session patterns
         let filtered = candidates.filter { session in
             let id = session.id.lowercased()
             let systemPrefixes = ["cron:", "schedule:", "luna-", "gav-", "kieran-", "q-"]
@@ -321,20 +374,11 @@ public final class BeeChatMobileViewModel {
         return filtered
     }
 
-    /// Create topics from selected gateway sessions.
-    /// Uses the existing gateway session key to preserve message history.
-    /// Each import is wrapped in a GRDB write transaction for atomicity.
-    /// On bridge failure (UNIQUE constraint), the transaction rolls back —
-    /// no orphaned topic, no deleted messages.
-    ///
-    /// - Returns: The number of topics successfully created.
     public func importSelected(_ sessions: [Session]) throws -> Int {
         let existingKeys = try persistenceStore.topicRepo.fetchAllActiveSessionKeys()
         var count = 0
 
         for session in sessions {
-            // Pre-check: skip if session already has a bridge.
-            // This reduces violations but doesn't guarantee prevention (TOCTOU race).
             if existingKeys.contains(session.id) {
                 continue
             }
@@ -348,18 +392,14 @@ public final class BeeChatMobileViewModel {
                 sessionKey: session.id
             )
 
-            // Atomic transaction: topic + bridge saved together, or neither.
             do {
                 try persistenceStore.topicRepo.saveAndBridgeInTransaction(topic, sessionKey: session.id)
                 count += 1
             } catch {
-                // Transaction rolled back — topic was never persisted.
-                // No cleanup needed. No messages deleted.
                 print("[ViewModel] Import failed for session \(session.id): \(error)")
             }
         }
 
-        // Refresh
         self.topics = try persistenceStore.topicRepo.fetchAllActiveWithCounts()
         return count
     }
@@ -372,7 +412,6 @@ public final class BeeChatMobileViewModel {
             ])
         }
 
-        // Persist user message locally for immediate display (both online and offline paths)
         let userMessage = BeeChatPersistence.Message(
             id: UUID().uuidString,
             sessionId: sessionKey,
@@ -385,7 +424,6 @@ public final class BeeChatMobileViewModel {
         try persistenceStore.saveMessage(userMessage)
 
         guard let bridge = syncBridge else {
-            // Offline-only: message already persisted above
             return
         }
 
@@ -405,7 +443,6 @@ public final class BeeChatMobileViewModel {
                 if content != lastContent {
                     lastContent = content
                     updateCounter += 1
-                    // Coalesce: update every 2-3 tokens to reduce UI churn
                     if updateCounter >= 2 || content.count - (self.streamingContent[sessionKey]?.count ?? 0) > 10 {
                         updateCounter = 0
                         self.streamingContent[sessionKey] = content
@@ -426,8 +463,6 @@ public final class BeeChatMobileViewModel {
     private func startMessageObservation() {
         messageObservationTask?.cancel()
         messageObservationTask = Task {
-            // Simple polling-based observation for MVP
-            // Post-Gate-2: use GRDB ValueObservation
             while !Task.isCancelled {
                 self.refreshTopics()
                 try? await Task.sleep(nanoseconds: 500_000_000) // 500ms
@@ -440,12 +475,10 @@ public final class BeeChatMobileViewModel {
     private func seedTestData() throws {
         let topicRepo = persistenceStore.topicRepo
 
-        // Create 3 seed topics with gateway-format keys
         let topic1 = try topicRepo.create(name: "Welcome to BeeChat")
         let topic2 = try topicRepo.create(name: "Solar Dashboard Help")
         let topic3 = try topicRepo.create(name: "Project Planning")
 
-        // Save test messages linked to topic1's session key
         guard let sessionKey = topic1.sessionKey else { return }
         let msgs: [BeeChatPersistence.Message] = [
             BeeChatPersistence.Message(
@@ -485,7 +518,7 @@ public enum TopicError: LocalizedError, Sendable {
     case nameRequired
     case nameTooLong(count: Int)
     case gatewayNotConnected
-    
+
     public var errorDescription: String? {
         switch self {
         case .nameRequired:
@@ -537,6 +570,29 @@ extension BeeChatMobileViewModel: SyncBridgeDelegate {
 
     nonisolated public func syncBridge(_ bridge: SyncBridge, didStartAutoReset sessionKey: String) {}
     nonisolated public func syncBridge(_ bridge: SyncBridge, didStopAutoReset sessionKey: String) {}
-    nonisolated public func syncBridge(_ bridge: SyncBridge, didStartManualReset sessionKey: String) {}
-    nonisolated public func syncBridge(_ bridge: SyncBridge, didStopManualReset sessionKey: String) {}
+
+    // Phase 2 Step 8: Delegate callback with 10-second debounce
+    nonisolated public func syncBridgeSessionsChanged(_ bridge: SyncBridge) {
+        Task { @MainActor in
+            let now = Date()
+            guard now.timeIntervalSince(self.lastSessionsChangedSync) >= 10 else { return }
+            self.lastSessionsChangedSync = now
+
+            do {
+                guard let syncBridge = self.syncBridge else { return }
+                let sessionInfos = try await syncBridge.fetchSessionInfos()
+                let knownTopics = sessionInfos.compactMap { info -> (GatewaySessionInfo, BeeChatTopicMetadata)? in
+                    guard let metadata = info.beechatMetadata else { return nil }
+                    return (info.asGatewaySessionInfo, metadata)
+                }
+                try persistenceStore.upsertTopicsFromGateway(knownTopics)
+                self.topics = try persistenceStore.fetchAllActiveWithCounts()
+                if self.hasAdminScope {
+                    self.syncState = .synced(lastSync: Date())
+                }
+            } catch {
+                print("[ViewModel] sessions.changed sync failed: \(error)")
+            }
+        }
+    }
 }
