@@ -13,7 +13,7 @@ public enum SyncState: Equatable, Sendable {
 }
 
 extension SyncState {
-    var symbol: String {
+    public var symbol: String {
         switch self {
         case .synced: return "checkmark.icloud.fill"
         case .syncing: return "arrow.triangle.2.circlepath"
@@ -21,7 +21,7 @@ extension SyncState {
         case .syncUnavailable: return "info.circle.fill"
         }
     }
-    var colorAccentName: String {
+    public var colorAccentName: String {
         switch self {
         case .synced(let lastSync):
             return Date().timeIntervalSince(lastSync) < 300 ? "secondary" : "orange"
@@ -30,7 +30,7 @@ extension SyncState {
         case .syncUnavailable: return "secondary"
         }
     }
-    var label: String {
+    public var label: String {
         switch self {
         case .synced(let lastSync):
             let interval = Date().timeIntervalSince(lastSync)
@@ -42,7 +42,7 @@ extension SyncState {
         case .syncUnavailable(let reason): return reason
         }
     }
-    var isStale: Bool {
+    public var isStale: Bool {
         guard case .synced(let lastSync) = self else { return false }
         return Date().timeIntervalSince(lastSync) > 300
     }
@@ -136,7 +136,6 @@ public final class BeeChatMobileViewModel {
                 version: "1.0",
                 platform: "ios",
                 mode: gatewayConfig.clientMode,
-                deviceFamily: "mobile"
             )
         )
 
@@ -197,7 +196,7 @@ public final class BeeChatMobileViewModel {
             for topic in pendingTopics {
                 guard let sessionKey = topic.sessionKey else { continue }
                 do {
-                    _ = try await bridge.sendMessage(sessionKey: sessionKey, text: "Start", topic: topic)
+                    _ = try await bridge.sendMessage(sessionKey: sessionKey, text: "Start")
                     try persistenceStore.topicRepo.markSynced(topicId: topic.id)
                 } catch {
                     print("[ViewModel] Failed to reconcile topic \(topic.id): \(error)")
@@ -291,7 +290,7 @@ public final class BeeChatMobileViewModel {
         // Phase 2 Step 9: Publish to gateway if connected + admin scope
         if !isOffline, let bridge = syncBridge, hasAdminScope, let sessionKey = topic.sessionKey {
             let topicForPublish = try persistenceStore.fetchTopicById(topic.id)!
-            bridge.publishTopicState(topic: topicForPublish, sessionKey: sessionKey)
+            Task { await bridge.publishTopicState(topic: topicForPublish, sessionKey: sessionKey) }
         }
 
         // Refresh and auto-select
@@ -329,7 +328,7 @@ public final class BeeChatMobileViewModel {
 
         // Publish updated state to gateway
         if let bridge = syncBridge, connectionState == .connected, hasAdminScope, let sessionKey = topic.sessionKey {
-            bridge.publishTopicState(topic: topic, sessionKey: sessionKey)
+            Task { await bridge.publishTopicState(topic: topic, sessionKey: sessionKey) }
         }
 
         if selectedTopicId == id { selectedTopicId = topics.first?.id }
@@ -347,7 +346,7 @@ public final class BeeChatMobileViewModel {
 
         // Publish updated state to gateway
         if let bridge = syncBridge, connectionState == .connected, hasAdminScope, let sessionKey = topic.sessionKey {
-            bridge.publishTopicState(topic: topic, sessionKey: sessionKey)
+            Task { await bridge.publishTopicState(topic: topic, sessionKey: sessionKey) }
         }
     }
 
@@ -427,7 +426,7 @@ public final class BeeChatMobileViewModel {
             return
         }
 
-        _ = try await bridge.sendMessage(sessionKey: sessionKey, text: text, topic: topic)
+        _ = try await bridge.sendMessage(sessionKey: sessionKey, text: text)
     }
 
     // MARK: - Streaming
@@ -476,8 +475,8 @@ public final class BeeChatMobileViewModel {
         let topicRepo = persistenceStore.topicRepo
 
         let topic1 = try topicRepo.create(name: "Welcome to BeeChat")
-        let topic2 = try topicRepo.create(name: "Solar Dashboard Help")
-        let topic3 = try topicRepo.create(name: "Project Planning")
+        _ = try topicRepo.create(name: "Solar Dashboard Help")
+        _ = try topicRepo.create(name: "Project Planning")
 
         guard let sessionKey = topic1.sessionKey else { return }
         let msgs: [BeeChatPersistence.Message] = [

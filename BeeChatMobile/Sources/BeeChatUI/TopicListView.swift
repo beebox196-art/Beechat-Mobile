@@ -13,7 +13,7 @@ public struct TopicListView: View {
     @State private var isShowingImportSheet = false
     @State private var importCandidates: [Session] = []
     @State private var selectedImportIds: Set<String> = []
-    private(set) var isLoadingCandidates = false
+    @State private var isLoadingCandidates = false
     @State private var importCandidateCount: Int = 0
 
     // Archive undo — Task-based (not DispatchQueue)
@@ -268,9 +268,14 @@ public struct TopicListView: View {
             return AnyView(EmptyView())
         }
         // Show footer for actionable states: syncing, stale, sync unavailable
-        guard viewModel.syncState.isStale ||
-              case .syncing = viewModel.syncState ||
-              case .syncUnavailable = viewModel.syncState else {
+        let shouldShowFooter: Bool = {
+            if viewModel.syncState.isStale { return true }
+            switch viewModel.syncState {
+            case .syncing, .syncUnavailable: return true
+            default: return false
+            }
+        }()
+        guard shouldShowFooter else {
             return AnyView(EmptyView())
         }
 
@@ -376,15 +381,17 @@ public struct TopicListView: View {
         }
     }
 
-    private func loadImportCandidates() async {
-        isLoadingCandidates = true
-        do {
-            importCandidates = try await viewModel.importCandidates()
-            selectedImportIds = []
-        } catch {
-            viewModel.connectionError = error.localizedDescription
+    private func loadImportCandidates() {
+        Task {
+            isLoadingCandidates = true
+            do {
+                importCandidates = try await viewModel.importCandidates()
+                selectedImportIds = []
+            } catch {
+                viewModel.connectionError = error.localizedDescription
+            }
+            isLoadingCandidates = false
         }
-        isLoadingCandidates = false
     }
 }
 
