@@ -28,6 +28,7 @@ public final class BeeChatMobileViewModel {
     private var streamingPollTask: Task<Void, Never>?
     private var connectionWatchTask: Task<Void, Never>?
     private var messageObservationTask: Task<Void, Never>?
+    private var isReconciling: Bool = false
 
     public init(config: BeeChatMobileConfig) {
         self.config = config
@@ -122,6 +123,14 @@ public final class BeeChatMobileViewModel {
 
             // 2. Fetch sessions from gateway
             let sessions = try await bridge.fetchSessions()
+
+            // 2b. Fetch session infos with metadata and reconcile topics (Gate 2F Phase 1)
+            do {
+                let sessionInfos = try await bridge.fetchSessionInfos()
+                reconcileTopics(from: sessionInfos)
+            } catch {
+                print("[ViewModel] fetchSessionInfos() failed: \(error). Continuing without metadata sync.")
+            }
 
             // 3. Filter to only BeeChat sessions (using injected repo)
             let beeChatSessions = sessions.filter { session in
@@ -498,6 +507,90 @@ public enum TopicError: LocalizedError, Sendable {
     }
 }
 
+// MARK: - Topic Reconciliation
+
+extension BeeChatMobileViewModel {
+    /// Reconcile local topics from gateway session metadata.
+    /// Called on initial connect and on `sessions.changed` events.
+    private func reconcileTopics(from sessionInfos: [SessionInfo]) {
+        let topicRepo = persistenceStore.topicRepo
+
+        // Phase 1: Create or update topics from gateway metadata
+        for info in sessionInfos {
+            // No metadata — this is a raw session (no topic published yet).
+            // Skip: existing flow in connect() already handles raw sessions.
+            guard let metadata = info.beechatMetadata else { continue }
+
+            // Gateway has topic metadata — use it as truth
+            if let topicId = try? topicRepo.resolveTopicId(for: info.key),
+               let fetchedTopic = try? topicRepo.fetchById(topicId) {
+                // Update existing topic with gateway data
+                var topic = fetchedTopic
+                var changed = false
+                if topic.name != info.label {
+                    topic.name = info.label ?? topic.name
+                    changed = true
+                }
+                if topic.isArchived != metadata.isArchived {
+                    topic.isArchived = metadata.isArchived
+                    changed = true
+                }
+                if topic.projectPath != metadata.projectPath {
+                    do {
+                        try topic.setProjectPath(metadata.projectPath)
+                        changed = true
+                    } catch {
+                        print("[ViewModel] Failed to set project path for topic \(topic.id): \(error)")
+                    }
+                }
+                if changed {
+                    topic.updatedAt = Date()
+                    do {
+                        try topicRepo.save(topic)
+                    } catch {
+                        print("[ViewModel] Failed to save updated topic \(topic.id): \(error)")
+                    }
+                }
+            } else {
+                // New topic from gateway — create locally
+                var topic = Topic(
+                    id: metadata.topicId,
+                    name: info.label ?? "Conversation",
+                    sessionKey: info.key,
+                    isArchived: metadata.isArchived
+                )
+                do {
+                    try topic.setProjectPath(metadata.projectPath)
+                    try topicRepo.save(topic)
+                    // Save bridge entry for session key lookup
+                    try topicRepo.saveBridge(topicId: topic.id, sessionKey: info.key)
+                } catch {
+                    print("[ViewModel] Failed to create topic from gateway metadata: \(error)")
+                }
+            }
+        }
+
+        // Phase 2: Orphan detection — local topics whose session key isn't in gateway list
+        let gatewayKeys = Set(sessionInfos.map { $0.key })
+        do {
+            let localTopics = try topicRepo.fetchAllActive()
+            for topic in localTopics {
+                guard let sessionKey = topic.sessionKey else { continue }
+                if !gatewayKeys.contains(sessionKey) {
+                    if !topic.isArchived {
+                        var archivedTopic = topic
+                        archivedTopic.isArchived = true
+                        archivedTopic.updatedAt = Date()
+                        try topicRepo.save(archivedTopic)
+                    }
+                }
+            }
+        } catch {
+            print("[ViewModel] Failed to archive orphan topics: \(error)")
+        }
+    }
+}
+
 // MARK: - SyncBridgeDelegate
 
 extension BeeChatMobileViewModel: SyncBridgeDelegate {
@@ -539,4 +632,18 @@ extension BeeChatMobileViewModel: SyncBridgeDelegate {
     nonisolated public func syncBridge(_ bridge: SyncBridge, didStopAutoReset sessionKey: String) {}
     nonisolated public func syncBridge(_ bridge: SyncBridge, didStartManualReset sessionKey: String) {}
     nonisolated public func syncBridge(_ bridge: SyncBridge, didStopManualReset sessionKey: String) {}
+
+    nonisolated public func syncBridge(_ bridge: SyncBridge, didReceiveSessionChange sessionKeys: [String]) {
+        Task { @MainActor in
+            guard !self.isReconciling else { return }
+            self.isReconciling = true
+            defer { self.isReconciling = false }
+            do {
+                let sessionInfos = try await bridge.fetchSessionInfos()
+                self.reconcileTopics(from: sessionInfos)
+            } catch {
+                print("[ViewModel] Failed to reconcile topics: \(error)")
+            }
+        }
+    }
 }
