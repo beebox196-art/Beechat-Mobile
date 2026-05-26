@@ -1,10 +1,10 @@
 # Gate 2F: Persistent Topic Linking — Implementation Brief
 
 **Spec ID:** GATE-2F-PERSISTENT-TOPIC-LINKING
-**Date:** 2026-05-26 (v2 — revised after Q + Kieran review)
+**Date:** 2026-05-26 (v3 — revised after v2 review)
 **Author:** Bee (coordinator)
 **Reviewers:** Q (implementation), Kieran (safety)
-**Status:** DRAFT v2 — Pending team review
+**Status:** APPROVED — Ready for build
 **Priority:** High — next active feature for mobile
 
 ---
@@ -15,7 +15,7 @@ Topics created on the Mac don't appear on the iPhone, and vice versa. Each devic
 
 ## Goal
 
-Same topics on both Mac and iPhone — like Telegram. Mac is master by convention (it has the project paths, the full app, the file system). Gateway stores metadata. iPhone reads from gateway and writes on create.
+Same topics on both Mac and iPhone — like Telegram. Phase 1: Mac is sole publisher, iPhone is read-only. Phase 2: both are peers with last-write-wins, self-healing on reconcile.
 
 ---
 
@@ -120,17 +120,19 @@ func reconcileTopics(from sessionInfos: [SessionInfo]) {
         }
 
         // Gateway has topic metadata — use it as truth
-        if let existingTopic = topicRepo.findBySessionKey(info.key) {
+        if let topicId = try? topicRepo.resolveTopicId(for: info.key),
+           let existingTopic = try? topicRepo.fetchById(topicId) {
             // Update existing topic with gateway data
             var changed = false
             if existingTopic.name != info.label { existingTopic.name = info.label; changed = true }
             if existingTopic.isArchived != metadata.isArchived { existingTopic.isArchived = metadata.isArchived; changed = true }
-            if existingTopic.projectPath != metadata.projectPath { existingTopic.projectPath = metadata.projectPath; changed = true }
-            if changed { try topicRepo.update(existingTopic) }
+            if existingTopic.projectPath != metadata.projectPath { try existingTopic.setProjectPath(metadata.projectPath); changed = true }
+            if changed { try topicRepo.save(existingTopic) }
         } else {
             // New topic from gateway — create locally
-            let topic = Topic(id: metadata.topicId, name: info.label, sessionKey: info.key, isArchived: metadata.isArchived, projectPath: metadata.projectPath)
-            try topicRepo.create(topic)
+            var topic = Topic(id: metadata.topicId, name: info.label ?? "Conversation", sessionKey: info.key, isArchived: metadata.isArchived)
+            try topic.setProjectPath(metadata.projectPath)
+            try topicRepo.save(topic)
         }
     }
 
@@ -140,7 +142,7 @@ func reconcileTopics(from sessionInfos: [SessionInfo]) {
         // Gateway session gone — archive locally (don't delete, user might want history)
         if !topic.isArchived {
             topic.isArchived = true
-            try topicRepo.update(topic)
+            try topicRepo.save(topic)
         }
     }
 }
@@ -164,14 +166,23 @@ Add the delegate method from Change 1:
 
 ```swift
 func syncBridge(_ bridge: SyncBridge, didReceiveSessionChange sessionKeys: [String]) {
+    guard !isReconciling else { return }  // skip if already in-flight
+    isReconciling = true
     Task { @MainActor in
-        let sessionInfos = try await bridge.fetchSessionInfos()
-        reconcileTopics(from: sessionInfos)
+        defer { isReconciling = false }
+        do {
+            let sessionInfos = try await bridge.fetchSessionInfos()
+            reconcileTopics(from: sessionInfos)
+        } catch {
+            logger.warning("Failed to reconcile topics: \(error)")
+        }
     }
 }
 ```
 
-**Debounce:** Add a simple debounce — ignore events within 500ms of the last reconciliation. This prevents rapid-fire events from causing duplicate fetches. Use a `lastReconciliation: Date?` property.
+**Guard, not debounce:** Use an `isReconciling: Bool` flag instead of date-based debounce. If a reconciliation is already in-flight, skip the event — the next one will pick up any changes. Simpler and avoids the race where a debounce timer fires after data has already been reconciled.
+
+**Error handling:** If `fetchSessionInfos()` fails, log the warning and continue. The `sessions.changed` event will trigger another reconciliation when the connection stabilises.
 
 ### Change 5: Keep 500ms Polling (Don't Remove)
 
@@ -185,34 +196,39 @@ The existing 500ms polling (`startMessageObservation()`) serves a different purp
 
 Current validation rejects paths not starting with `/Users/`. iOS will never have that path.
 
-**Fix:** Make validation platform-conditional:
+**Fix:** Make the **entire validation block** platform-conditional. The current code has three checks: prefix guard, `fileExists`, and `isDirectory`. On iOS, the prefix will never match (it's a Mac path) and `fileExists`/`isDirectory` will always fail for Mac paths. Gate ALL of it:
 
 ```swift
-#if os(macOS)
-guard path.hasPrefix("/Users/") else { throw TopicError.invalidProjectPath }
-#else
-// iOS: accept any non-empty path (it comes from Mac via gateway)
-guard !path.isEmpty else { throw TopicError.invalidProjectPath }
-#endif
+func setProjectPath(_ path: String?) throws {
+    guard let path else { self.metadataJSON = nil; return }
+    #if os(macOS)
+    let resolved = path.hasPrefix("/") ? path : ("/Users/openclaw/Projects/" + path)
+    guard resolved.hasPrefix("/Users/openclaw/Projects/") else { throw TopicError.invalidProjectPath }
+    var isDir: ObjCBool = false
+    guard FileManager.default.fileExists(atPath: resolved, isDirectory: &isDir), isDir.boolValue else { throw TopicError.invalidProjectPath }
+    self.metadataJSON = TopicMetadata(projectPath: resolved).encode()
+    #else
+    // iOS: path comes from Mac via gateway metadata — skip filesystem validation
+    guard !path.isEmpty else { throw TopicError.invalidProjectPath }
+    self.metadataJSON = TopicMetadata(projectPath: path).encode()
+    #endif
+}
 ```
 
-This is a one-line change in the shared package.
+On iOS, we only check the path is non-empty since it's a Mac path we'll never validate against a local filesystem.
 
-### Change 7: Scope Verification on Connect (Mobile ViewModel)
+### Change 7: Scope Verification (Deferred to Phase 2)
 
-**File:** `BeeChatMobileViewModel.swift`
+Phase 1 is read-only — the iPhone only calls `fetchSessionInfos()` which doesn't require `operator.admin` scope. Scope verification only matters when the iPhone starts publishing metadata (Phase 2). Defer this check.
 
-After `connect()`, check admin scope and warn if missing:
-
+In Phase 2, add after `connect()`:
 ```swift
 let scopes = await bridge.grantedScopes()
 hasAdminScope = scopes.contains("operator.admin")
 if !hasAdminScope {
-    // Log warning — topic metadata won't sync without admin scope
+    // Log warning — topic metadata publishing will fail
 }
 ```
-
-No need to block functionality — just warn. Auto-pairing grants full scopes, so this should be rare.
 
 ---
 
@@ -227,9 +243,12 @@ No need to block functionality — just warn. Auto-pairing grants full scopes, s
 | 1A | Add `didReceiveSessionChange` to `SyncBridgeDelegate` + route in `EventRouter` | `SyncBridgeDelegate.swift`, `EventRouter.swift` | Yes |
 | 1B | Add `fetchSessionInfos()` call in `connect()` | `BeeChatMobileViewModel.swift` | No |
 | 1C | Add `reconcileTopics(from:)` method | `BeeChatMobileViewModel.swift` | No |
-| 1D | Wire `didReceiveSessionChange` delegate + debounce | `BeeChatMobileViewModel.swift` | No |
-| 1E | Fix `Topic.setProjectPath` for iOS | `Topic.swift` | Yes |
-| 1F | Scope verification on connect | `BeeChatMobileViewModel.swift` | No |
+| 1D | Wire `didReceiveSessionChange` delegate + guard | `BeeChatMobileViewModel.swift` | No |
+| 1E | Fix `Topic.setProjectPath` for iOS (full validation block) | `Topic.swift` | Yes |
+
+**Build order:** 1A and 1E first (shared package changes, can compile and unit-test independently). Then 1B+1C together (fetch + reconcile). Then 1D (wires the delegate, requires 1A merged).
+
+**Error handling:** If `fetchSessionInfos()` fails on connect, log the error and continue. The `sessions.changed` event will trigger reconciliation when the connection stabilises. Don't block the UI for metadata sync.
 
 **Exit criteria:**
 - Create a topic on Mac → it appears on iPhone within seconds
@@ -305,14 +324,14 @@ func syncBridge(_ bridge: SyncBridge, didReceiveSessionChange sessionKeys: [Stri
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Sync direction | Bidirectional (Mac ↔ iPhone) | Telegram-like UX requires both |
-| Authority | Gateway stores metadata, Mac is master by convention | Mac has file system and project paths. iPhone reads from gateway. |
+| Sync direction | Phase 1: Mac → iPhone (read-only). Phase 2: bidirectional | Get read-only working first, then add write-through |
+| Authority | Phase 1: Mac is sole publisher. Phase 2: peers, last-write-wins, self-healing | Honest about the asymmetry. No enforcement needed for single-user two-device setup. |
 | Conflict resolution | Gateway state wins on reconcile | Simple, deterministic. Last-write-wins for metadata. |
 | Orphan handling | Archive locally, don't delete | User might want message history. Safe default. |
 | Persistence | `metadataJSON` column on Topic | Already exists, no migration needed |
 | RPC method | `sessionsPluginPatch(key:pluginId:namespace:value:unset:)` | Already exists in shared packages |
 | Event driver | `sessions.changed` via `SyncBridgeDelegate` | Need to add delegate method — single shared package change |
-| Scope required | `operator.admin` | Already granted on auto-pairing. Warn if missing, don't block. |
+| Scope required | `operator.admin` | Only needed in Phase 2 (iPhone publishing). Defer scope check to Phase 2. |
 | Polling | Keep 500ms polling | It's for local UI, not gateway sync. Different purpose. |
 | `fetchSessions` vs `fetchSessionInfos` | Use `fetchSessionInfos()` for metadata | `fetchSessions()` strips `pluginExtensions` |
 
@@ -352,7 +371,7 @@ func syncBridge(_ bridge: SyncBridge, didReceiveSessionChange sessionKeys: [Stri
 | 2 | `operator.admin` scope missing on iPhone | Low | High | Auto-pairing grants full scopes; warn on connect if missing |
 | 3 | Race: local topic + gateway topic for same session | Low | Medium | Bridge UNIQUE constraint prevents duplicates |
 | 4 | `beechatMetadata` parse fails on nil/empty | Low | Medium | Graceful fallback to raw session data |
-| 5 | Rapid `sessions.changed` events | Medium | Low | 500ms debounce on reconciliation |
+| 5 | Rapid `sessions.changed` events | Medium | Low | `isReconciling` guard — skip if already in-flight |
 
 ---
 
@@ -375,3 +394,6 @@ func syncBridge(_ bridge: SyncBridge, didReceiveSessionChange sessionKeys: [Stri
 | v1 | 2026-05-26 | Q | 15 verified, 3 mismatches, 11 gaps — RPCClient signatures wrong, no delegate method, wrong fetch method |
 | v1 | 2026-05-26 | Kieran | 7 blockers, 9 warnings, 9 passes — no orphan cleanup, archive state not reconciled, polling shouldn't be removed, iOS path validation broken |
 | v2 | 2026-05-26 | Bee (coordinator) | Revised spec addressing all 7 blockers + 9 warnings |
+| v2 | 2026-05-26 | Q | All 7 blockers FIXED. Simplicity: ABOUT RIGHT. Pseudocode uses non-existent methods (`findBySessionKey`, `update`, `projectPath` init param) — fix at build time |
+| v2 | 2026-05-26 | Kieran | 6 FIXED, 1 PARTIALLY FIXED (setProjectPath needs full block gated, not just prefix). Simplicity: ABOUT RIGHT. Deferred scope check to Phase 2. Guard > debounce. |
+| v3 | 2026-05-26 | Bee (coordinator) | Fixed setProjectPath to gate full validation block. Guard instead of debounce. Deferred scope check. Honest Phase 1/2 asymmetry. Build order added. |
