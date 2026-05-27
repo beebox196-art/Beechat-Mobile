@@ -30,6 +30,11 @@ public final class BeeChatMobileViewModel {
     private var messageObservationTask: Task<Void, Never>?
     private var isReconciling: Bool = false
 
+    /// Well-known session key for topic sync payload (Mac → iPhone)
+    private static let syncSessionKey = "agent:main:beechat-sync"
+    /// UserDefaults key for last sync payload timestamp (staleness guard)
+    private static let lastSyncTimestampKey = "beechat_lastSyncTimestamp"
+
     public init(config: BeeChatMobileConfig) {
         self.config = config
         self.persistenceStore = BeeChatPersistenceStore()
@@ -121,34 +126,31 @@ public final class BeeChatMobileViewModel {
                 }
             }
 
-            // 2. Fetch sessions from gateway
-            let sessions = try await bridge.fetchSessions()
-
-            // 2. Fetch session infos and reconcile topics
+            // 2. Read topic sync payload from gateway (with staleness guard)
+            isReconciling = true
             do {
-                let sessionInfos = try await bridge.fetchSessionInfos()
-                try await reconcileFromGateway(sessionInfos)
+                if let payload = try await readSyncPayload() {
+                    try reconcileFromPayload(payload)
+                } else {
+                    print("[ViewModel] No sync payload available — standalone mode (local topics only)")
+                }
             } catch {
-                print("[ViewModel] fetchSessionInfos() failed: \(error). Continuing without metadata sync.")
+                print("[ViewModel] Sync payload read failed: \(error) — standalone mode (local topics only)")
             }
+            isReconciling = false
 
-            // 3. Filter to only BeeChat sessions (using injected repo)
-            let beeChatSessions = sessions.filter { session in
-                (try? BeeChatSessionFilter.isBeeChatSession(session.id, topicRepo: persistenceStore.topicRepo)) == true
-            }
-
-            // 4. Sync metadata from BeeChat sessions to local topics
-            try persistenceStore.topicRepo.syncMetadataFromSessions(beeChatSessions)
-
-            // 5. Refresh topic list
+            // 3. Refresh topic list
             self.topics = try persistenceStore.topicRepo.fetchAllActiveWithCounts()
 
-            // 6. Auto-select first topic
+            // 4. Auto-select first topic (or re-select if archived)
             if self.selectedTopicId == nil, let first = topics.first {
                 self.selectedTopicId = first.id
+            } else if let selectedId = self.selectedTopicId,
+                      self.topics.first(where: { $0.id == selectedId }) == nil {
+                self.selectedTopicId = self.topics.first?.id
             }
 
-            // 8. Session subscription is handled by SyncBridge.start()
+            // 5. Session subscription is handled by SyncBridge.start()
             startMessageObservation()
         } catch {
             connectionState = .error
@@ -487,41 +489,85 @@ public enum TopicError: LocalizedError, Sendable {
     }
 }
 
-// MARK: - Shared Reconciliation
+// MARK: - Topic Sync
 
 extension BeeChatMobileViewModel {
-    /// Reconcile local topics from a complete gateway session list.
-    /// Creates topics for new BeeChat sessions, and refreshes the list.
-    /// Called from both connect() and didReceiveSessionChange.
-    /// Note: syncMetadataFromSessions() (which needs [Session]) is NOT called here —
-    /// only connect() has [Session] data for preview/unread counts.
-    private func reconcileFromGateway(_ sessionInfos: [SessionInfo]) async throws {
+    /// Read the topic sync payload from the gateway's beechat-sync session.
+    /// Returns nil if no payload exists (standalone mode) or if the payload is invalid/stale.
+    private func readSyncPayload() async throws -> TopicSyncPayload? {
+        guard let bridge = syncBridge else { return nil }
+        guard let content = try await bridge.fetchSyncPayload(sessionKey: "agent:main:beechat-sync") else {
+            return nil
+        }
+        guard let payload = TopicSyncPayload.extract(from: content) else {
+            return nil
+        }
+        // Staleness guard: reject payloads older than the last sync
+        let defaults = UserDefaults.standard
+        let lastSync = defaults.double(forKey: "beechat_lastSyncTimestamp")
+        if let payloadDate = payload.timestampDate {
+            let payloadTimestamp = payloadDate.timeIntervalSince1970
+            if payloadTimestamp <= lastSync {
+                print("[ViewModel] Sync payload is stale (payload=\(payloadTimestamp), last=\(lastSync)), skipping")
+                return nil
+            }
+            defaults.set(payloadTimestamp, forKey: "beechat_lastSyncTimestamp")
+        }
+        return payload
+    }
+
+    /// Reconcile local topics from a sync payload.
+    /// Creates/updates topics from the Mac's list, archives Mac-origin topics not in the payload,
+    /// and never archives local-origin topics.
+    private func reconcileFromPayload(_ payload: TopicSyncPayload) throws {
         let topicRepo = persistenceStore.topicRepo
 
-        // 1. Filter to BeeChat sessions using injected repo
-        let beeChatSessionKeys = sessionInfos.filter { info in
-            (try? BeeChatSessionFilter.isBeeChatSession(info.key, topicRepo: topicRepo)) == true
-        }.map(\.key)
+        // Collect all session keys from the payload for matching
+        let payloadKeys = Set(payload.topics.map(\.sessionKey))
 
-        let beeChatInfos = sessionInfos.filter { beeChatSessionKeys.contains($0.key) }
+        // 1. Match by sessionKey first, then by id
+        for item in payload.topics {
+            // Try sessionKey match first (handles migration from nil-origin topics)
+            let existingById = try topicRepo.fetchById(item.id)
+            let existingBySessionKey = item.sessionKey.isEmpty ? nil : try topicRepo.resolveTopicId(for: item.sessionKey).flatMap { try topicRepo.fetchById($0) }
 
-        // 2. Create topics for any new BeeChat sessions
-        for info in beeChatInfos {
-            if try topicRepo.resolveTopicId(for: info.key) == nil {
+            if let existing = existingBySessionKey ?? existingById {
+                // Update existing topic
+                var updated = existing
+                updated.name = item.name
+                updated.isArchived = item.isArchived ?? false
+                updated.lastActivityAt = item.lastActivityDate
+                updated.lastMessagePreview = item.lastMessagePreview
+                updated.origin = "mac"
+                updated.sessionKey = item.sessionKey
+                updated.updatedAt = Date()
+                try topicRepo.save(updated)
+            } else {
+                // Create new topic from payload
                 let topic = Topic(
-                    id: UUID().uuidString,
-                    name: info.label ?? "Conversation",
-                    lastMessagePreview: nil,  // SessionInfo doesn't have preview
-                    lastActivityAt: info.lastMessageAt.flatMap { ISO8601DateFormatter().date(from: $0) },
-                    sessionKey: info.key
+                    id: item.id,
+                    name: item.name,
+                    lastMessagePreview: item.lastMessagePreview,
+                    lastActivityAt: item.lastActivityDate,
+                    sessionKey: item.sessionKey,
+                    isArchived: item.isArchived ?? false,
+                    origin: "mac"
                 )
                 try topicRepo.save(topic)
+                // Create bridge entry
                 do {
-                    try topicRepo.saveBridge(topicId: topic.id, sessionKey: info.key)
+                    try topicRepo.saveBridge(topicId: topic.id, sessionKey: item.sessionKey)
                 } catch {
-                    print("[ViewModel] Bridge already exists for session \(info.key): \(error)")
+                    print("[ViewModel] Bridge save failed for \(item.id): \(error)")
                 }
             }
+        }
+
+        // 2. Archive Mac-origin topics not in the payload
+        // Use Int.max limit to ensure ALL topics are checked for archival
+        let allTopics = try topicRepo.fetchAllActive(limit: Int.max)
+        for topic in allTopics where topic.origin == "mac" && !payloadKeys.contains(topic.sessionKey ?? "") {
+            try topicRepo.archive(topicId: topic.id)
         }
 
         // 3. Refresh topic list
@@ -576,12 +622,16 @@ extension BeeChatMobileViewModel: SyncBridgeDelegate {
             guard !self.isReconciling else { return }
             self.isReconciling = true
             defer { self.isReconciling = false }
+
+            // Only re-read sync payload when the beechat-sync session changes
+            guard sessionKeys.contains(where: { $0.contains("beechat-sync") }) else { return }
+
             do {
-                // Use fetchSessionInfos() — returns ALL sessions (fetchSessions() filters out 0-token ones)
-                let sessionInfos = try await bridge.fetchSessionInfos()
-                try await self.reconcileFromGateway(sessionInfos)
+                if let payload = try await self.readSyncPayload() {
+                    try self.reconcileFromPayload(payload)
+                }
             } catch {
-                print("[ViewModel] Failed to reconcile sessions: \(error)")
+                print("[ViewModel] Failed to reconcile sync payload: \(error)")
             }
         }
     }

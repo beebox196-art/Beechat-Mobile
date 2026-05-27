@@ -34,9 +34,13 @@ public struct MessageMapper {
         var lastUserContent: [String: Date] = [:]  // content -> timestamp, for dedup
 
         for message in messages {
-            // Dedup: skip if a message with same role+content was already added within 2 seconds
-            if message.role == "user", let content = message.content, let existingTime = lastUserContent[content] {
-                if abs(message.timestamp.timeIntervalSince(existingTime)) < 2.0 {
+            // Dedup: skip if a message with same role+content was already added within 10 seconds
+            // Guard: only dedup user-role messages with ≥20 characters (avoid false positives on "yes", "ok")
+            if message.role == "user",
+               let content = message.content,
+               content.count >= 20,
+               let existingTime = lastUserContent[content] {
+                if abs(message.timestamp.timeIntervalSince(existingTime)) < 10.0 {
                     continue  // Skip duplicate
                 }
             }
