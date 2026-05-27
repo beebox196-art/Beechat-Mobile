@@ -124,10 +124,10 @@ public final class BeeChatMobileViewModel {
             // 2. Fetch sessions from gateway
             let sessions = try await bridge.fetchSessions()
 
-            // 2b. Fetch session infos with metadata and reconcile topics (Gate 2F Phase 1)
+            // 2. Fetch session infos and reconcile topics
             do {
                 let sessionInfos = try await bridge.fetchSessionInfos()
-                reconcileTopics(from: sessionInfos)
+                try await reconcileFromGateway(sessionInfos)
             } catch {
                 print("[ViewModel] fetchSessionInfos() failed: \(error). Continuing without metadata sync.")
             }
@@ -137,33 +137,13 @@ public final class BeeChatMobileViewModel {
                 (try? BeeChatSessionFilter.isBeeChatSession(session.id, topicRepo: persistenceStore.topicRepo)) == true
             }
 
-            // 4. Create topics for new gateway sessions without a topic
-            for gatewaySession in beeChatSessions {
-                if try persistenceStore.topicRepo.resolveTopicId(for: gatewaySession.id) == nil {
-                    let topic = Topic(
-                        id: UUID().uuidString,
-                        name: gatewaySession.title ?? gatewaySession.customName ?? "Conversation",
-                        lastMessagePreview: gatewaySession.lastMessagePreview,
-                        lastActivityAt: gatewaySession.lastMessageAt ?? gatewaySession.updatedAt,
-                        unreadCount: gatewaySession.unreadCount,
-                        sessionKey: gatewaySession.id
-                    )
-                    try persistenceStore.topicRepo.save(topic)
-                    do {
-                        try persistenceStore.topicRepo.saveBridge(topicId: topic.id, sessionKey: gatewaySession.id)
-                    } catch {
-                        print("[ViewModel] Bridge already exists for session \(gatewaySession.id): \(error)")
-                    }
-                }
-            }
-
-            // 5. Sync metadata from BeeChat sessions to local topics
+            // 4. Sync metadata from BeeChat sessions to local topics
             try persistenceStore.topicRepo.syncMetadataFromSessions(beeChatSessions)
 
-            // 6. Refresh topic list
+            // 5. Refresh topic list
             self.topics = try persistenceStore.topicRepo.fetchAllActiveWithCounts()
 
-            // 7. Auto-select first topic
+            // 6. Auto-select first topic
             if self.selectedTopicId == nil, let first = topics.first {
                 self.selectedTopicId = first.id
             }
@@ -507,87 +487,45 @@ public enum TopicError: LocalizedError, Sendable {
     }
 }
 
-// MARK: - Topic Reconciliation
+// MARK: - Shared Reconciliation
 
 extension BeeChatMobileViewModel {
-    /// Reconcile local topics from gateway session metadata.
-    /// Called on initial connect and on `sessions.changed` events.
-    private func reconcileTopics(from sessionInfos: [SessionInfo]) {
+    /// Reconcile local topics from a complete gateway session list.
+    /// Creates topics for new BeeChat sessions, and refreshes the list.
+    /// Called from both connect() and didReceiveSessionChange.
+    /// Note: syncMetadataFromSessions() (which needs [Session]) is NOT called here —
+    /// only connect() has [Session] data for preview/unread counts.
+    private func reconcileFromGateway(_ sessionInfos: [SessionInfo]) async throws {
         let topicRepo = persistenceStore.topicRepo
 
-        // Phase 1: Create or update topics from gateway metadata
-        for info in sessionInfos {
-            // No metadata — this is a raw session (no topic published yet).
-            // Skip: existing flow in connect() already handles raw sessions.
-            guard let metadata = info.beechatMetadata else { continue }
+        // 1. Filter to BeeChat sessions using injected repo
+        let beeChatSessionKeys = sessionInfos.filter { info in
+            (try? BeeChatSessionFilter.isBeeChatSession(info.key, topicRepo: topicRepo)) == true
+        }.map(\.key)
 
-            // Gateway has topic metadata — use it as truth
-            if let topicId = try? topicRepo.resolveTopicId(for: info.key),
-               let fetchedTopic = try? topicRepo.fetchById(topicId) {
-                // Update existing topic with gateway data
-                var topic = fetchedTopic
-                var changed = false
-                if topic.name != info.label {
-                    topic.name = info.label ?? topic.name
-                    changed = true
-                }
-                if topic.isArchived != metadata.isArchived {
-                    topic.isArchived = metadata.isArchived
-                    changed = true
-                }
-                if topic.projectPath != metadata.projectPath {
-                    do {
-                        try topic.setProjectPath(metadata.projectPath)
-                        changed = true
-                    } catch {
-                        print("[ViewModel] Failed to set project path for topic \(topic.id): \(error)")
-                    }
-                }
-                if changed {
-                    topic.updatedAt = Date()
-                    do {
-                        try topicRepo.save(topic)
-                    } catch {
-                        print("[ViewModel] Failed to save updated topic \(topic.id): \(error)")
-                    }
-                }
-            } else {
-                // New topic from gateway — create locally
-                var topic = Topic(
-                    id: metadata.topicId,
+        let beeChatInfos = sessionInfos.filter { beeChatSessionKeys.contains($0.key) }
+
+        // 2. Create topics for any new BeeChat sessions
+        for info in beeChatInfos {
+            if try topicRepo.resolveTopicId(for: info.key) == nil {
+                let topic = Topic(
+                    id: UUID().uuidString,
                     name: info.label ?? "Conversation",
-                    sessionKey: info.key,
-                    isArchived: metadata.isArchived
+                    lastMessagePreview: nil,  // SessionInfo doesn't have preview
+                    lastActivityAt: info.lastMessageAt.flatMap { ISO8601DateFormatter().date(from: $0) },
+                    sessionKey: info.key
                 )
+                try topicRepo.save(topic)
                 do {
-                    try topic.setProjectPath(metadata.projectPath)
-                    try topicRepo.save(topic)
-                    // Save bridge entry for session key lookup
                     try topicRepo.saveBridge(topicId: topic.id, sessionKey: info.key)
                 } catch {
-                    print("[ViewModel] Failed to create topic from gateway metadata: \(error)")
+                    print("[ViewModel] Bridge already exists for session \(info.key): \(error)")
                 }
             }
         }
 
-        // Phase 2: Orphan detection — local topics whose session key isn't in gateway list
-        let gatewayKeys = Set(sessionInfos.map { $0.key })
-        do {
-            let localTopics = try topicRepo.fetchAllActive()
-            for topic in localTopics {
-                guard let sessionKey = topic.sessionKey else { continue }
-                if !gatewayKeys.contains(sessionKey) {
-                    if !topic.isArchived {
-                        var archivedTopic = topic
-                        archivedTopic.isArchived = true
-                        archivedTopic.updatedAt = Date()
-                        try topicRepo.save(archivedTopic)
-                    }
-                }
-            }
-        } catch {
-            print("[ViewModel] Failed to archive orphan topics: \(error)")
-        }
+        // 3. Refresh topic list
+        self.topics = try topicRepo.fetchAllActiveWithCounts()
     }
 }
 
@@ -639,10 +577,11 @@ extension BeeChatMobileViewModel: SyncBridgeDelegate {
             self.isReconciling = true
             defer { self.isReconciling = false }
             do {
+                // Use fetchSessionInfos() — returns ALL sessions (fetchSessions() filters out 0-token ones)
                 let sessionInfos = try await bridge.fetchSessionInfos()
-                self.reconcileTopics(from: sessionInfos)
+                try await self.reconcileFromGateway(sessionInfos)
             } catch {
-                print("[ViewModel] Failed to reconcile topics: \(error)")
+                print("[ViewModel] Failed to reconcile sessions: \(error)")
             }
         }
     }
