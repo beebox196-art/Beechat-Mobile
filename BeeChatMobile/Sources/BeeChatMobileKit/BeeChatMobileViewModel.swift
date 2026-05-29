@@ -30,11 +30,6 @@ public final class BeeChatMobileViewModel {
     private var messageObservationTask: Task<Void, Never>?
     private var isReconciling: Bool = false
 
-    /// Well-known session key for topic sync payload (Mac → iPhone)
-    private static let syncSessionKey = "agent:main:beechat-sync"
-    /// UserDefaults key for last sync payload timestamp (staleness guard)
-    private static let lastSyncTimestampKey = "beechat_lastSyncTimestamp"
-
     public init(config: BeeChatMobileConfig) {
         self.config = config
         self.persistenceStore = BeeChatPersistenceStore()
@@ -65,6 +60,9 @@ public final class BeeChatMobileViewModel {
     /// Connect to the live gateway. Call after `start()`.
     public func connect() async {
         guard syncBridge == nil else { return }
+
+        // One-time cleanup: remove stale gateway-sync timestamp (Gate 2F backout)
+        UserDefaults.standard.removeObject(forKey: "beechat_lastSyncTimestamp")
 
         NSLog("[BeeChat] connect() called - about to load gateway config")
 
@@ -126,17 +124,10 @@ public final class BeeChatMobileViewModel {
                 }
             }
 
-            // 2. Read topic sync payload from gateway (with staleness guard)
+            // 2. TODO: REST topic fetch (replaces gateway-sync payload read)
             isReconciling = true
-            do {
-                if let payload = try await readSyncPayload() {
-                    try reconcileFromPayload(payload)
-                } else {
-                    print("[ViewModel] No sync payload available — standalone mode (local topics only)")
-                }
-            } catch {
-                print("[ViewModel] Sync payload read failed: \(error) — standalone mode (local topics only)")
-            }
+            // Topic sync now via REST endpoint on Mac (see TopicServer.swift / TopicClient.swift)
+            print("[ViewModel] No sync payload available — standalone mode (local topics only)")
             isReconciling = false
 
             // 3. Refresh topic list
@@ -492,30 +483,6 @@ public enum TopicError: LocalizedError, Sendable {
 // MARK: - Topic Sync
 
 extension BeeChatMobileViewModel {
-    /// Read the topic sync payload from the gateway's beechat-sync session.
-    /// Returns nil if no payload exists (standalone mode) or if the payload is invalid/stale.
-    private func readSyncPayload() async throws -> TopicSyncPayload? {
-        guard let bridge = syncBridge else { return nil }
-        guard let content = try await bridge.fetchSyncPayload(sessionKey: "agent:main:beechat-sync") else {
-            return nil
-        }
-        guard let payload = TopicSyncPayload.extract(from: content) else {
-            return nil
-        }
-        // Staleness guard: reject payloads older than the last sync
-        let defaults = UserDefaults.standard
-        let lastSync = defaults.double(forKey: "beechat_lastSyncTimestamp")
-        if let payloadDate = payload.timestampDate {
-            let payloadTimestamp = payloadDate.timeIntervalSince1970
-            if payloadTimestamp <= lastSync {
-                print("[ViewModel] Sync payload is stale (payload=\(payloadTimestamp), last=\(lastSync)), skipping")
-                return nil
-            }
-            defaults.set(payloadTimestamp, forKey: "beechat_lastSyncTimestamp")
-        }
-        return payload
-    }
-
     /// Reconcile local topics from a sync payload.
     /// Creates/updates topics from the Mac's list, archives Mac-origin topics not in the payload,
     /// and never archives local-origin topics.
@@ -618,21 +585,7 @@ extension BeeChatMobileViewModel: SyncBridgeDelegate {
     nonisolated public func syncBridge(_ bridge: SyncBridge, didStopManualReset sessionKey: String) {}
 
     nonisolated public func syncBridge(_ bridge: SyncBridge, didReceiveSessionChange sessionKeys: [String]) {
-        Task { @MainActor in
-            guard !self.isReconciling else { return }
-            self.isReconciling = true
-            defer { self.isReconciling = false }
-
-            // Only re-read sync payload when the beechat-sync session changes
-            guard sessionKeys.contains(where: { $0.contains("beechat-sync") }) else { return }
-
-            do {
-                if let payload = try await self.readSyncPayload() {
-                    try self.reconcileFromPayload(payload)
-                }
-            } catch {
-                print("[ViewModel] Failed to reconcile sync payload: \(error)")
-            }
-        }
+        // TODO: REST topic re-fetch — when TopicClient is built, re-fetch on any sessions.changed
+        // with 5-second cooldown to avoid hammering the topic server
     }
 }
