@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import BeeChatPersistence
 import BeeChatGateway
 import BeeChatSyncBridge
@@ -29,6 +30,16 @@ public final class BeeChatMobileViewModel {
     private var connectionWatchTask: Task<Void, Never>?
     private var messageObservationTask: Task<Void, Never>?
     private var isReconciling: Bool = false
+
+    /// REST topic client for fetching topic data from the Mac via Tailscale Serve.
+    private var topicClient: TopicClient?
+
+    /// Mute timer for sessions.changed re-fetch.
+    /// After re-fetching once on sessions.changed, we mute for 60s to avoid hammering.
+    private var sessionsChangedMuteUntil: Date = .distantPast
+
+    /// Current scene phase for foreground detection.
+    public var scenePhase: ScenePhase = .background
 
     public init(config: BeeChatMobileConfig) {
         self.config = config
@@ -95,7 +106,7 @@ public final class BeeChatMobileViewModel {
             reconnectDebounceSeconds: config.reconnectDebounceSeconds
         )
 
-        let bridge = SyncBridge(config: bridgeConfig)
+        let bridge = SyncBridge(config: bridgeConfig, fileProvider: StubProjectFileProvider())
         await bridge.setDelegate(self)
         self.syncBridge = bridge
 
@@ -124,11 +135,16 @@ public final class BeeChatMobileViewModel {
                 }
             }
 
-            // 2. TODO: REST topic fetch (replaces gateway-sync payload read)
-            isReconciling = true
-            // Topic sync now via REST endpoint on Mac (see TopicServer.swift / TopicClient.swift)
-            print("[ViewModel] No sync payload available — standalone mode (local topics only)")
-            isReconciling = false
+            // 2. REST topic fetch — fetch from Mac's TopicServer via Tailscale Serve
+            if let url = URL(string: gatewayConfig.url) {
+                let client = TopicClient(gatewayURL: url)
+                self.topicClient = client
+                if let payload = await client.fetchTopics() {
+                    isReconciling = true
+                    try reconcileFromPayload(payload)
+                    isReconciling = false
+                }
+            }
 
             // 3. Refresh topic list
             self.topics = try persistenceStore.topicRepo.fetchAllActiveWithCounts()
@@ -461,6 +477,24 @@ public final class BeeChatMobileViewModel {
             print("[ViewModel] Failed to refresh topics: \(error)")
         }
     }
+
+    // MARK: - Scene Phase (Foreground Detection)
+
+    /// Called by the app when the scene phase changes.
+    /// When the app moves to the foreground (.active), fetch topics from the Mac.
+    public func onScenePhaseChange(_ phase: ScenePhase) {
+        self.scenePhase = phase
+
+        if phase == .active {
+            // Fetch topics from Mac's TopicServer when app comes to foreground
+            Task { @MainActor in
+                guard !self.isReconciling, let client = self.topicClient else { return }
+                if let payload = await client.fetchTopics() {
+                    try? self.reconcileFromPayload(payload)
+                }
+            }
+        }
+    }
 }
 
 public enum TopicError: LocalizedError, Sendable {
@@ -585,7 +619,21 @@ extension BeeChatMobileViewModel: SyncBridgeDelegate {
     nonisolated public func syncBridge(_ bridge: SyncBridge, didStopManualReset sessionKey: String) {}
 
     nonisolated public func syncBridge(_ bridge: SyncBridge, didReceiveSessionChange sessionKeys: [String]) {
-        // TODO: REST topic re-fetch — when TopicClient is built, re-fetch on any sessions.changed
-        // with 5-second cooldown to avoid hammering the topic server
+        // Re-fetch topics from the Mac's TopicServer on sessions.changed.
+        // Mute for 60s to avoid hammering if multiple events fire in quick succession.
+        Task { @MainActor in
+            let now = Date()
+            guard now >= self.sessionsChangedMuteUntil else { return }
+            guard let client = self.topicClient else { return }
+
+            self.sessionsChangedMuteUntil = now.addingTimeInterval(60)
+            guard !self.isReconciling else { return }
+
+            self.isReconciling = true
+            if let payload = await client.fetchTopics() {
+                try? self.reconcileFromPayload(payload)
+            }
+            self.isReconciling = false
+        }
     }
 }
