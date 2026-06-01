@@ -14,19 +14,18 @@ struct TopicClient {
     let topicsURL: URL
 
     /// Create a TopicClient from the gateway configuration.
-    /// Derives the topics URL by appending `/topics/v1/topics` to the gateway domain.
+    /// Derives the topics URL by replacing the gateway path with `/topics/v1/topics`
+    /// and switching scheme from `wss` to `https` (URLSession requires HTTP for plain GET).
+    ///
+    /// gatewayURL = "wss://openclaws-mac-mini-1.tail3f2df8.ts.net/ws"
+    /// topicsURL  = "https://openclaws-mac-mini-1.tail3f2df8.ts.net/topics/v1/topics"
     init(gatewayURL: URL) {
-        // Append /topics/v1/topics to the gateway URL
         var components = URLComponents(url: gatewayURL, resolvingAgainstBaseURL: false)!
-        // Preserve existing path and append the topic server path
-        let existingPath = components.path
-        if existingPath.isEmpty || existingPath == "/" {
-            components.path = "/topics/v1/topics"
-        } else {
-            // Remove trailing slash and append
-            let cleanPath = existingPath.hasSuffix("/") ? String(existingPath.dropLast()) : existingPath
-            components.path = cleanPath + "/topics/v1/topics"
-        }
+        // URLSession rejects wss/ws for plain HTTP GET — switch to https
+        components.scheme = "https"
+        // Strip the /ws suffix and use the topic server path
+        components.path = "/topics/v1/topics"
+        components.query = nil  // strip any query params from gateway URL
 
         self.topicsURL = components.url!
 
