@@ -5,6 +5,7 @@ import BeeChatMobileKit
 @main
 struct BeeChatMobileApp: App {
     @State private var viewModel = BeeChatMobileViewModel(config: BeeChatMobileConfig())
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
@@ -20,6 +21,9 @@ struct BeeChatMobileApp: App {
                         viewModel.connectionError = error.localizedDescription
                         viewModel.connectionState = .error
                     }
+                }
+                .onChange(of: scenePhase) { oldPhase, newPhase in
+                    viewModel.onScenePhaseChange(newPhase)
                 }
         }
     }

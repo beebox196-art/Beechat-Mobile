@@ -141,7 +141,7 @@ public final class BeeChatMobileViewModel {
                 self.topicClient = client
                 if let payload = await client.fetchTopics() {
                     isReconciling = true
-                    try reconcileFromPayload(payload)
+                    try? reconcileFromPayload(payload)
                     isReconciling = false
                 }
             }
@@ -624,10 +624,10 @@ extension BeeChatMobileViewModel: SyncBridgeDelegate {
         Task { @MainActor in
             let now = Date()
             guard now >= self.sessionsChangedMuteUntil else { return }
+            guard !self.isReconciling else { return }
             guard let client = self.topicClient else { return }
 
             self.sessionsChangedMuteUntil = now.addingTimeInterval(60)
-            guard !self.isReconciling else { return }
 
             self.isReconciling = true
             if let payload = await client.fetchTopics() {
