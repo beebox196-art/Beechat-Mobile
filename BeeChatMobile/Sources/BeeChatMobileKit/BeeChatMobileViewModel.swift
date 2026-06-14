@@ -16,6 +16,9 @@ public final class BeeChatMobileViewModel {
     public var connectionState: ConnectionState = .disconnected
     public var isStreaming: Bool = false
     public var connectionError: String? = nil
+    /// Incremented after syncAllTopicMessages completes. The View observes this
+    /// to trigger a message reload after bulk history sync.
+    public var messageSyncVersion: Int = 0
 
     /// Per-topic streaming content for live UI updates
     public var streamingContent: [String: String] = [:]
@@ -158,6 +161,11 @@ public final class BeeChatMobileViewModel {
             }
 
             // 5. Session subscription is handled by SyncBridge.start()
+
+            // 6. Sync messages for all topics — bulk fetch recent history from gateway.
+            //    This ensures we have up-to-date messages even if we missed real-time events.
+            await syncAllTopicMessages()
+
             startMessageObservation()
         } catch {
             connectionState = .error
@@ -189,7 +197,28 @@ public final class BeeChatMobileViewModel {
     // MARK: - Data Access
 
     public func messages(for sessionId: String) throws -> [BeeChatPersistence.Message] {
-        try persistenceStore.fetchMessages(sessionId: sessionId, limit: 200, before: nil)
+        try persistenceStore.fetchMessages(sessionId: sessionId, limit: 100, before: nil)
+    }
+
+    /// Load messages for a session from local GRDB.
+    /// Called by the View when a topic is selected or when connection state changes.
+    /// Load messages for a session. Falls back to gateway fetch when local GRDB is empty.
+    /// Bulk history sync is handled separately by syncAllTopicMessages().
+    public func loadMessagesWithHistory(sessionKey: String) async throws -> [BeeChatPersistence.Message] {
+        let local = try persistenceStore.fetchMessages(sessionId: sessionKey, limit: 100, before: nil)
+        if !local.isEmpty {
+            return local
+        }
+        // Local is empty — fetch from gateway (Mac is the master, iPhone is the cache)
+        guard let bridge = syncBridge else { return local }
+        do {
+            let fetched = try await bridge.fetchHistory(sessionKey: sessionKey, limit: 30)
+            print("[ViewModel] loadMessagesWithHistory: fetched \(fetched.count) messages from gateway for \(sessionKey)")
+            return fetched
+        } catch {
+            print("[ViewModel] loadMessagesWithHistory: fetch failed for \(sessionKey): \(error)")
+            return local
+        }
     }
 
     /// Resolve a Topic ID to the session key used for message lookups.
@@ -387,6 +416,20 @@ public final class BeeChatMobileViewModel {
             return
         }
 
+        // Ensure we have history for this session before sending.
+        // For Mac-origin topics with no local messages, fetch recent history first so the
+        // gateway has context for this session subscription.
+        // 30 messages is enough for context — not pulling the full history.
+        let localIsEmpty = (try? persistenceStore.fetchMessages(sessionId: sessionKey, limit: 1, before: nil).isEmpty) ?? false
+        print("[ViewModel] Pre-send fetchHistory for \(sessionKey), local empty: \(localIsEmpty)")
+        if localIsEmpty {
+            do {
+                _ = try await bridge.fetchHistory(sessionKey: sessionKey, limit: 30)
+            } catch {
+                print("[ViewModel] Pre-send fetchHistory failed for \(sessionKey): \(error)")
+            }
+        }
+
         _ = try await bridge.sendMessage(sessionKey: sessionKey, text: text, topic: topic)
     }
 
@@ -424,11 +467,12 @@ public final class BeeChatMobileViewModel {
     private func startMessageObservation() {
         messageObservationTask?.cancel()
         messageObservationTask = Task {
-            // Simple polling-based observation for MVP
-            // Post-Gate-2: use GRDB ValueObservation
+            // Poll topic list for metadata changes (titles, counts, timestamps).
+            // Real-time message delivery is via sessions.messages.subscribe + session.message events,
+            // so we don't need aggressive polling. 5s is enough for topic list refresh.
             while !Task.isCancelled {
                 self.refreshTopics()
-                try? await Task.sleep(nanoseconds: 500_000_000) // 500ms
+                try? await Task.sleep(nanoseconds: 5_000_000_000) // 5s
             }
         }
     }
@@ -481,19 +525,59 @@ public final class BeeChatMobileViewModel {
     // MARK: - Scene Phase (Foreground Detection)
 
     /// Called by the app when the scene phase changes.
-    /// When the app moves to the foreground (.active), fetch topics from the Mac.
+    /// When the app moves to the foreground (.active), fetch topics AND messages from the Mac.
     public func onScenePhaseChange(_ phase: ScenePhase) {
         self.scenePhase = phase
 
         if phase == .active {
-            // Fetch topics from Mac's TopicServer when app comes to foreground
             Task { @MainActor in
-                guard !self.isReconciling, let client = self.topicClient else { return }
-                if let payload = await client.fetchTopics() {
+                // 1. Refresh topic metadata from Mac's TopicServer
+                guard !self.isReconciling else { return }
+                if let client = self.topicClient, let payload = await client.fetchTopics() {
+                    self.isReconciling = true
                     try? self.reconcileFromPayload(payload)
+                    self.isReconciling = false
                 }
+
+                // 2. Sync messages for all topics — fetch recent history from gateway
+                // This is the primary sync mechanism. Real-time events are a bonus,
+                // but this bulk fetch ensures we never miss messages.
+                await self.syncAllTopicMessages()
             }
         }
+    }
+
+    /// Fetch recent message history for all topics from the gateway.
+    /// This is called on connect and on foreground to ensure the iPhone
+    /// always has up-to-date messages, regardless of whether real-time
+    /// events were received while backgrounded.
+    public func syncAllTopicMessages() async {
+        guard let bridge = syncBridge else {
+            print("[ViewModel] syncAllTopicMessages: syncBridge is nil, skipping")
+            return
+        }
+        print("[ViewModel] syncAllTopicMessages: starting for \(topics.count) topics")
+        for topic in topics {
+            guard let sessionKey = topic.sessionKey else { continue }
+            do {
+                // fetchHistory persists to GRDB; the next loadMessages() call
+                // will pick up the new messages from local storage.
+                let fetched = try await bridge.fetchHistory(sessionKey: sessionKey, limit: 30)
+                print("[ViewModel] syncAllTopicMessages: fetched \(fetched.count) messages for \(sessionKey)")
+            } catch {
+                print("[ViewModel] syncAllTopicMessages failed for \(sessionKey): \(error)")
+            }
+        }
+
+        // Re-read messages for the currently selected topic so the UI updates immediately.
+        if let topicId = selectedTopicId,
+           let key = sessionKey(for: topicId) {
+            let _ = try? persistenceStore.fetchMessages(sessionId: key, limit: 100, before: nil)
+        }
+        // Refresh the topic list so the UI picks up updated message counts
+        self.refreshTopics()
+        // Bump version so the View knows to reload messages
+        self.messageSyncVersion += 1
     }
 }
 

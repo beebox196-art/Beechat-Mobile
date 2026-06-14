@@ -42,3 +42,6 @@ Package.resolved
 # Secrets
 *.env
 .env
+
+# Code review output (generated)
+.review/
