@@ -1,0 +1,24 @@
+name: W4MemoryProbeiOS
+
+packages:
+  markdown-webview:
+    url: https://github.com/tomdai/markdown-webview
+    branch: main
+
+targets:
+  W4MemoryProbeiOS:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: "com.ambox.w4memoryprobe"
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: "YES"
+        INFOPLIST_KEY_UILaunchScreen_Generation: "YES"
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+    dependencies:
+      - package: markdown-webview
+        product: MarkdownWebView
